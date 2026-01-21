@@ -1,0 +1,898 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RF Controller - DEMO</title>
+    <link rel="icon" type="image/png" sizes="32x32" href="../data/img/favicon-32x32.png">
+    <meta name="theme-color" content="#1A2634">
+    <link rel="stylesheet" href="../data/style.css">
+    <style>
+        /* Demo Banner */
+        .demo-banner {
+            background: linear-gradient(135deg, #ff6b6b 0%, #ffa500 100%);
+            color: white;
+            text-align: center;
+            padding: 10px;
+            font-weight: bold;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 1000;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+        }
+        .demo-banner small {
+            display: block;
+            font-weight: normal;
+            font-size: 0.8em;
+            opacity: 0.9;
+        }
+        .app-container {
+            margin-top: 60px;
+        }
+        /* Demo console */
+        .demo-console {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: #1a1a2e;
+            color: #0f0;
+            font-family: monospace;
+            font-size: 12px;
+            max-height: 150px;
+            overflow-y: auto;
+            padding: 10px;
+            border-top: 2px solid #29ABE2;
+            z-index: 999;
+        }
+        .demo-console-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 5px;
+            color: #29ABE2;
+            font-weight: bold;
+        }
+        .demo-console-toggle {
+            background: #29ABE2;
+            color: white;
+            border: none;
+            padding: 2px 8px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 10px;
+        }
+        .demo-console.minimized {
+            max-height: 30px;
+            overflow: hidden;
+        }
+        .demo-console .log-entry {
+            margin: 2px 0;
+            padding: 2px 5px;
+            border-radius: 3px;
+        }
+        .demo-console .log-entry.info { color: #0ff; }
+        .demo-console .log-entry.success { color: #0f0; }
+        .demo-console .log-entry.warning { color: #ff0; }
+        .demo-console .log-entry.error { color: #f00; }
+        .demo-console .log-entry.rf { color: #f0f; }
+
+        .content {
+            padding-bottom: 170px;
+        }
+
+        /* Simulated signal visualization */
+        .signal-visualization {
+            background: #1a1a2e;
+            border-radius: 8px;
+            padding: 15px;
+            margin: 10px 0;
+        }
+        .signal-wave {
+            height: 60px;
+            background: linear-gradient(90deg,
+                transparent 0%, #29ABE2 2%, #29ABE2 4%, transparent 6%,
+                transparent 8%, #29ABE2 10%, #29ABE2 14%, transparent 16%,
+                transparent 18%, #29ABE2 20%, #29ABE2 22%, transparent 24%,
+                transparent 26%, #29ABE2 28%, #29ABE2 32%, transparent 34%,
+                transparent 36%, #29ABE2 38%, #29ABE2 40%, transparent 42%,
+                transparent 100%
+            );
+            background-size: 200% 100%;
+            animation: signal-flow 1s linear infinite;
+            border-radius: 4px;
+        }
+        @keyframes signal-flow {
+            0% { background-position: 100% 0; }
+            100% { background-position: 0% 0; }
+        }
+        .signal-wave.paused {
+            animation-play-state: paused;
+            background: #333;
+        }
+
+        /* Capture flow sections */
+        .capture-target, .capture-settings, .capture-action-section, .identify-section {
+            background: rgba(41, 171, 226, 0.1);
+            border: 1px solid rgba(41, 171, 226, 0.3);
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 15px;
+        }
+        .capture-target h3, .capture-settings h3, .capture-action-section h3, .identify-section h3 {
+            margin-top: 0;
+            color: #29ABE2;
+            font-size: 1.1em;
+        }
+        .help-text {
+            color: #888;
+            font-size: 0.9em;
+            margin-top: 5px;
+        }
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+        }
+        @media (max-width: 600px) {
+            .form-row {
+                grid-template-columns: 1fr;
+            }
+        }
+        .identify-section {
+            background: rgba(255, 193, 7, 0.1);
+            border-color: rgba(255, 193, 7, 0.3);
+        }
+        .identify-section h3 {
+            color: #ffc107;
+        }
+        #device-type-info {
+            background: rgba(41, 171, 226, 0.1);
+            padding: 10px;
+            border-radius: 5px;
+            margin-top: 10px;
+        }
+        #device-type-info ul {
+            margin: 5px 0 0 20px;
+            padding: 0;
+        }
+        .signal-item.empty {
+            opacity: 0.6;
+            border-style: dashed;
+        }
+        .signal-item-details.empty {
+            color: #888;
+            font-style: italic;
+        }
+        .btn-secondary {
+            background: #6c757d;
+            color: white;
+        }
+        .btn-secondary:hover {
+            background: #5a6268;
+        }
+        .device-icon {
+            font-size: 1.2em;
+            margin-right: 5px;
+        }
+
+        /* Somfy RTS Styles */
+        .btn-somfy {
+            background: linear-gradient(135deg, #e63946 0%, #d62828 100%);
+            color: white;
+            border: none;
+        }
+        .btn-somfy:hover {
+            background: linear-gradient(135deg, #d62828 0%, #c1121f 100%);
+        }
+        .badge-somfy {
+            background: #e63946;
+            color: white;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 0.7em;
+            font-weight: bold;
+            margin-left: 5px;
+        }
+        .somfy-device {
+            border-left: 3px solid #e63946;
+        }
+        .somfy-btn {
+            background: linear-gradient(135deg, #e63946 0%, #d62828 100%) !important;
+        }
+        .somfy-btn:hover {
+            background: linear-gradient(135deg, #d62828 0%, #c1121f 100%) !important;
+        }
+        .somfy-header {
+            background: linear-gradient(135deg, #e63946 0%, #d62828 100%);
+        }
+        .somfy-info {
+            background: rgba(230, 57, 70, 0.1);
+            border: 1px solid rgba(230, 57, 70, 0.3);
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 15px;
+        }
+        .somfy-info p {
+            margin: 0;
+            color: #e63946;
+        }
+        .pairing-steps {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 15px;
+        }
+        .pairing-steps h3 {
+            margin-top: 0;
+            color: #1a1a2e;
+        }
+        .pairing-steps ol {
+            margin: 0;
+            padding-left: 20px;
+        }
+        .pairing-steps li {
+            margin-bottom: 10px;
+            color: #333;
+        }
+        .pairing-info {
+            background: rgba(41, 171, 226, 0.1);
+            border-radius: 8px;
+            padding: 15px;
+        }
+        .pairing-info p {
+            margin: 5px 0;
+        }
+        .header-buttons {
+            display: flex;
+            gap: 10px;
+        }
+
+        /* Dooya Bidireccional Styles */
+        .btn-dooya {
+            background: linear-gradient(135deg, #2e7d32 0%, #1b5e20 100%);
+            color: white;
+            border: none;
+        }
+        .btn-dooya:hover {
+            background: linear-gradient(135deg, #1b5e20 0%, #0d3d12 100%);
+        }
+        .badge-dooya {
+            background: #2e7d32;
+            color: white;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 0.7em;
+            font-weight: bold;
+            margin-left: 5px;
+        }
+        .dooya-device {
+            border-left: 3px solid #2e7d32;
+        }
+        .dooya-btn {
+            background: linear-gradient(135deg, #2e7d32 0%, #1b5e20 100%) !important;
+        }
+        .dooya-btn:hover {
+            background: linear-gradient(135deg, #1b5e20 0%, #0d3d12 100%) !important;
+        }
+        .dooya-header {
+            background: linear-gradient(135deg, #2e7d32 0%, #1b5e20 100%);
+        }
+        .dooya-info {
+            background: rgba(46, 125, 50, 0.1);
+            border: 1px solid rgba(46, 125, 50, 0.3);
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 15px;
+        }
+        .dooya-info p {
+            margin: 0;
+            color: #2e7d32;
+        }
+        .frame-display {
+            background: #1a1a2e;
+            color: #0f0;
+            font-family: monospace;
+            padding: 10px;
+            border-radius: 5px;
+            word-break: break-all;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <!-- Demo Banner -->
+    <div class="demo-banner">
+        MODO DEMO - Simulacion sin hardware
+        <small>Los datos son ficticios y se guardan en el navegador</small>
+    </div>
+
+    <div class="app-container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-brand">
+                <img src="../data/img/dirasmart-logo.png" alt="RF Controller" class="header-logo">
+                <h1>RF Controller</h1>
+            </div>
+            <div class="status-bar">
+                <span id="wifi-status" class="status-indicator connected">WiFi: Demo_Network</span>
+                <span id="rf-status" class="status-indicator connected">RF: 433.92 MHz</span>
+                <span id="time-display">--:--</span>
+            </div>
+        </header>
+
+        <!-- Navigation -->
+        <nav class="nav-tabs">
+            <button class="tab-btn active" data-tab="devices">Dispositivos</button>
+            <button class="tab-btn" data-tab="capture">Capturar</button>
+            <button class="tab-btn" data-tab="config">Configuracion</button>
+            <button class="tab-btn" data-tab="backup">Backup</button>
+        </nav>
+
+        <!-- Tab Content -->
+        <main class="content">
+            <!-- Dispositivos Tab -->
+            <section id="devices-tab" class="tab-content active">
+                <div class="section-header">
+                    <h2>Mis Dispositivos</h2>
+                    <div class="header-buttons">
+                        <button class="btn btn-primary" onclick="showAddDeviceModal()">+ Agregar</button>
+                        <button class="btn btn-somfy" onclick="showAddSomfyModal()">+ Somfy RTS</button>
+                        <button class="btn btn-dooya" onclick="showAddDooyaBidirModal()">+ Dooya DD</button>
+                    </div>
+                </div>
+
+                <div class="filter-bar">
+                    <select id="filter-type" onchange="filterDevices()">
+                        <option value="">Todos los tipos</option>
+                        <option value="1">Cortinas</option>
+                        <option value="10">Cortinas Somfy</option>
+                        <option value="11">Cortinas Dooya DD</option>
+                        <option value="2">Interruptores</option>
+                        <option value="3">Botones</option>
+                        <option value="4">Portones</option>
+                        <option value="5">Luces</option>
+                        <option value="6">Ventiladores</option>
+                        <option value="7">Dimmers</option>
+                        <option value="99">Otros</option>
+                    </select>
+                    <select id="filter-room" onchange="filterDevices()">
+                        <option value="">Todas las habitaciones</option>
+                    </select>
+                </div>
+
+                <div id="devices-list" class="devices-grid">
+                    <!-- Dispositivos se cargan dinamicamente -->
+                </div>
+            </section>
+
+            <!-- Capturar Tab -->
+            <section id="capture-tab" class="tab-content">
+                <div class="capture-panel">
+                    <h2>Capturar Senal RF</h2>
+
+                    <!-- Paso 1: Seleccionar dispositivo y funcion -->
+                    <div class="capture-target">
+                        <h3>1. Seleccionar destino</h3>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>Dispositivo</label>
+                                <select id="capture-device" onchange="updateCaptureSignalOptions()">
+                                    <option value="">-- Seleccionar --</option>
+                                    <!-- Se llena dinamicamente -->
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label>Funcion</label>
+                                <select id="capture-signal-slot">
+                                    <option value="">-- Primero selecciona dispositivo --</option>
+                                </select>
+                            </div>
+                        </div>
+                        <p class="help-text">Selecciona a que dispositivo y funcion asignar la senal capturada</p>
+                    </div>
+
+                    <!-- Paso 2: Configuracion RF -->
+                    <div class="capture-settings">
+                        <h3>2. Configuracion RF</h3>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>Frecuencia (MHz)</label>
+                                <div class="frequency-selector">
+                                    <select id="capture-frequency">
+                                        <option value="433.92">433.92 MHz (Europa/Latam)</option>
+                                        <option value="433.42">433.42 MHz (Somfy RTS)</option>
+                                        <option value="315.00">315.00 MHz (USA/Asia)</option>
+                                        <option value="868.00">868.00 MHz (Europa)</option>
+                                        <option value="300.00">300.00 MHz</option>
+                                        <option value="303.87">303.87 MHz</option>
+                                        <option value="310.00">310.00 MHz</option>
+                                        <option value="390.00">390.00 MHz</option>
+                                        <option value="418.00">418.00 MHz</option>
+                                        <option value="915.00">915.00 MHz (USA)</option>
+                                        <option value="custom">Personalizada...</option>
+                                    </select>
+                                    <input type="number" id="custom-frequency" step="0.01" placeholder="MHz" style="display:none;">
+                                </div>
+                            </div>
+
+                            <div class="form-group">
+                                <label>Modulacion</label>
+                                <select id="capture-modulation">
+                                    <option value="2">ASK/OOK (mas comun)</option>
+                                    <option value="0">2-FSK</option>
+                                    <option value="1">GFSK</option>
+                                    <option value="3">4-FSK</option>
+                                    <option value="4">MSK</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="form-group">
+                            <label>
+                                <input type="checkbox" id="auto-detect" checked> Deteccion automatica de frecuencia
+                            </label>
+                            <small>Escanea frecuencias comunes para encontrar la senal</small>
+                        </div>
+                    </div>
+
+                    <!-- Signal Visualization -->
+                    <div class="signal-visualization">
+                        <div id="signal-wave" class="signal-wave paused"></div>
+                    </div>
+
+                    <!-- Paso 3: Capturar -->
+                    <div class="capture-action-section">
+                        <h3>3. Capturar</h3>
+                        <div class="capture-controls">
+                            <button id="btn-start-capture" class="btn btn-large btn-success" onclick="startCapture()">
+                                Iniciar Captura
+                            </button>
+                            <button id="btn-stop-capture" class="btn btn-large btn-danger" onclick="stopCapture()" style="display:none;">
+                                Detener
+                            </button>
+                        </div>
+
+                        <div id="capture-status" class="capture-status">
+                            <div class="status-icon"></div>
+                            <p>Presiona el boton de tu control remoto (DEMO: se simulara una senal)</p>
+                        </div>
+                    </div>
+
+                    <!-- Resultado -->
+                    <div id="capture-result" class="capture-result" style="display:none;">
+                        <h3>Senal Capturada (Simulada)</h3>
+                        <div class="signal-info">
+                            <p><strong>Longitud:</strong> <span id="signal-length">--</span> bytes</p>
+                            <p><strong>Frecuencia:</strong> <span id="signal-frequency">--</span> MHz</p>
+                            <p><strong>Modulacion:</strong> <span id="signal-modulation">--</span></p>
+                            <p><strong>Protocolo detectado:</strong> <span id="signal-protocol">--</span></p>
+                        </div>
+                        <div class="signal-analysis">
+                            <h4>Analisis de senal</h4>
+                            <pre id="signal-analysis"></pre>
+                        </div>
+                        <div class="capture-actions">
+                            <button class="btn btn-primary" onclick="testCapturedSignal()">Probar Senal</button>
+                            <button class="btn btn-success" onclick="saveCurrentCapture()">Guardar</button>
+                            <button class="btn btn-secondary" onclick="clearCapture()">Nueva Captura</button>
+                        </div>
+                    </div>
+
+                    <!-- Opcion de solo identificar -->
+                    <div class="identify-section">
+                        <h3>Solo identificar senal</h3>
+                        <p>Captura una senal sin guardarla, solo para ver su analisis y protocolo detectado</p>
+                        <button id="btn-identify-signal" class="btn btn-warning" onclick="identifySignal()">Identificar Senal</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Configuracion Tab -->
+            <section id="config-tab" class="tab-content">
+                <div class="config-sections">
+                    <!-- WiFi -->
+                    <div class="config-section">
+                        <h3>Conexion WiFi</h3>
+                        <div class="form-group">
+                            <label>Red WiFi</label>
+                            <div class="wifi-select">
+                                <select id="wifi-ssid">
+                                    <option value="">Seleccionar red...</option>
+                                    <option value="Demo_Network">Demo_Network (-45 dBm)</option>
+                                    <option value="Casa_WiFi">Casa_WiFi (-62 dBm)</option>
+                                    <option value="Vecino_5G">Vecino_5G (-78 dBm)</option>
+                                </select>
+                                <button class="btn btn-small" onclick="scanWiFi()">Buscar</button>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>Contrasena</label>
+                            <input type="password" id="wifi-password" placeholder="Contrasena WiFi" value="demo1234">
+                        </div>
+                        <button class="btn btn-primary" onclick="connectWiFi()">Conectar</button>
+                    </div>
+
+                    <!-- MQTT -->
+                    <div class="config-section">
+                        <h3>MQTT (Home Assistant)</h3>
+                        <div class="form-group">
+                            <label>
+                                <input type="checkbox" id="mqtt-enabled" checked> Habilitar MQTT
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label>Servidor MQTT</label>
+                            <input type="text" id="mqtt-server" placeholder="192.168.1.100" value="192.168.1.100">
+                        </div>
+                        <div class="form-group">
+                            <label>Puerto</label>
+                            <input type="number" id="mqtt-port" value="1883">
+                        </div>
+                        <div class="form-group">
+                            <label>Usuario (opcional)</label>
+                            <input type="text" id="mqtt-user" placeholder="Usuario" value="homeassistant">
+                        </div>
+                        <div class="form-group">
+                            <label>Contrasena (opcional)</label>
+                            <input type="password" id="mqtt-password" placeholder="Contrasena">
+                        </div>
+                        <div class="form-group">
+                            <label>
+                                <input type="checkbox" id="mqtt-discovery" checked> Auto-discovery Home Assistant
+                            </label>
+                        </div>
+                    </div>
+
+                    <!-- Zona Horaria -->
+                    <div class="config-section">
+                        <h3>Fecha y Hora</h3>
+                        <div class="form-group">
+                            <label>Zona Horaria</label>
+                            <select id="timezone">
+                                <option value="America/Argentina/Buenos_Aires">Argentina (GMT-3)</option>
+                                <option value="America/Santiago">Chile (GMT-4/-3)</option>
+                                <option value="America/Bogota">Colombia (GMT-5)</option>
+                                <option value="America/Mexico_City">Mexico (GMT-6)</option>
+                                <option value="America/Lima">Peru (GMT-5)</option>
+                                <option value="America/Caracas">Venezuela (GMT-4)</option>
+                                <option value="Europe/Madrid">Espana (GMT+1/+2)</option>
+                                <option value="America/New_York">USA Este (GMT-5/-4)</option>
+                                <option value="America/Los_Angeles">USA Oeste (GMT-8/-7)</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Servidor NTP</label>
+                            <input type="text" id="ntp-server" value="pool.ntp.org">
+                        </div>
+                    </div>
+
+                    <!-- RF por defecto -->
+                    <div class="config-section">
+                        <h3>Configuracion RF</h3>
+                        <div class="form-group">
+                            <label>Frecuencia por defecto</label>
+                            <select id="default-frequency">
+                                <option value="433.92" selected>433.92 MHz</option>
+                                <option value="315.00">315.00 MHz</option>
+                                <option value="868.00">868.00 MHz</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>
+                                <input type="checkbox" id="auto-detect-enabled" checked> Deteccion automatica habilitada
+                            </label>
+                        </div>
+                    </div>
+
+                    <!-- Sistema -->
+                    <div class="config-section">
+                        <h3>Sistema</h3>
+                        <div class="form-group">
+                            <label>Nombre del dispositivo</label>
+                            <input type="text" id="device-name" value="RF_Controller_Demo">
+                        </div>
+                        <div class="system-info">
+                            <p><strong>IP:</strong> <span id="system-ip">192.168.4.1</span></p>
+                            <p><strong>Uptime:</strong> <span id="system-uptime">0h 0m 0s</span></p>
+                            <p><strong>Memoria libre:</strong> <span id="system-heap">245.3 KB</span></p>
+                            <p><strong>Version:</strong> <span>1.0.0 (DEMO)</span></p>
+                        </div>
+                    </div>
+
+                    <div class="config-actions">
+                        <button class="btn btn-primary btn-large" onclick="saveConfig()">Guardar Configuracion</button>
+                        <button class="btn btn-secondary" onclick="loadConfig()">Recargar</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Backup Tab -->
+            <section id="backup-tab" class="tab-content">
+                <div class="backup-section">
+                    <h3>Respaldo de Configuracion</h3>
+                    <p>Exporta toda tu configuracion y dispositivos guardados.</p>
+                    <button class="btn btn-primary btn-large" onclick="downloadBackup()">
+                        Descargar Backup
+                    </button>
+                </div>
+
+                <div class="backup-section">
+                    <h3>Restaurar Backup</h3>
+                    <p>Restaura configuracion desde un archivo de backup.</p>
+                    <div class="file-upload">
+                        <input type="file" id="backup-file" accept=".json">
+                        <label for="backup-file" class="btn btn-secondary">Seleccionar archivo</label>
+                    </div>
+                    <button class="btn btn-warning btn-large" onclick="restoreBackup()">
+                        Restaurar Backup
+                    </button>
+                </div>
+
+                <div class="backup-section danger-zone">
+                    <h3>Zona de Peligro</h3>
+                    <button class="btn btn-danger" onclick="confirmReboot()">Reiniciar Dispositivo</button>
+                    <button class="btn btn-danger" onclick="confirmFactoryReset()">Restaurar de Fabrica</button>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Modal: Agregar Dispositivo -->
+    <div id="modal-add-device" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Agregar Dispositivo</h2>
+                <button class="modal-close" onclick="closeModal('modal-add-device')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>Nombre</label>
+                    <input type="text" id="new-device-name" placeholder="Ej: Cortina Living">
+                </div>
+                <div class="form-group">
+                    <label>Tipo de dispositivo</label>
+                    <select id="new-device-type" onchange="showDeviceTypeInfo()">
+                        <option value="1">Cortina (Abrir / Cerrar / Parar)</option>
+                        <option value="2">Interruptor (On / Off)</option>
+                        <option value="3">Boton (Pulsar)</option>
+                        <option value="4">Porton (Toggle o Abrir/Cerrar)</option>
+                        <option value="5">Luz (On / Off)</option>
+                        <option value="6">Ventilador (On / Off / Velocidad)</option>
+                        <option value="7">Dimmer (On / Off / + / -)</option>
+                        <option value="99">Otro (Personalizado)</option>
+                    </select>
+                    <div id="device-type-info">
+                        <p><strong>Senales para Cortina:</strong></p>
+                        <ul>
+                            <li>Abrir</li>
+                            <li>Cerrar</li>
+                            <li>Parar</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Habitacion (opcional)</label>
+                    <input type="text" id="new-device-room" placeholder="Ej: Living">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('modal-add-device')">Cancelar</button>
+                <button class="btn btn-primary" onclick="addDevice()">Agregar</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: Editar Dispositivo -->
+    <div id="modal-edit-device" class="modal">
+        <div class="modal-content modal-large">
+            <div class="modal-header">
+                <h2>Editar Dispositivo</h2>
+                <button class="modal-close" onclick="closeModal('modal-edit-device')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="edit-device-id">
+                <div class="form-group">
+                    <label>Nombre</label>
+                    <input type="text" id="edit-device-name">
+                </div>
+                <div class="form-group">
+                    <label>Tipo de dispositivo</label>
+                    <select id="edit-device-type">
+                        <option value="1">Cortina (Abrir / Cerrar / Parar)</option>
+                        <option value="2">Interruptor (On / Off)</option>
+                        <option value="3">Boton (Pulsar)</option>
+                        <option value="4">Porton (Toggle o Abrir/Cerrar)</option>
+                        <option value="5">Luz (On / Off)</option>
+                        <option value="6">Ventilador (On / Off / Velocidad)</option>
+                        <option value="7">Dimmer (On / Off / + / -)</option>
+                        <option value="99">Otro (Personalizado)</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Habitacion</label>
+                    <input type="text" id="edit-device-room">
+                </div>
+
+                <h3>Senales del dispositivo</h3>
+                <div id="device-signals" class="signals-list">
+                    <!-- Senales se cargan dinamicamente -->
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-danger" onclick="deleteDevice()">Eliminar Dispositivo</button>
+                <button class="btn btn-secondary" onclick="closeModal('modal-edit-device')">Cancelar</button>
+                <button class="btn btn-primary" onclick="updateDevice()">Guardar Cambios</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: Agregar Somfy RTS -->
+    <div id="modal-add-somfy" class="modal">
+        <div class="modal-content">
+            <div class="modal-header somfy-header">
+                <h2>Agregar Cortina Somfy RTS</h2>
+                <button class="modal-close" onclick="closeModal('modal-add-somfy')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="somfy-info">
+                    <p>Las cortinas Somfy RTS usan rolling code encriptado. No necesitas capturar senales, solo emparejar el dispositivo con el motor.</p>
+                </div>
+                <div class="form-group">
+                    <label>Nombre</label>
+                    <input type="text" id="somfy-device-name" placeholder="Ej: Cortina Living">
+                </div>
+                <div class="form-group">
+                    <label>Habitacion (opcional)</label>
+                    <input type="text" id="somfy-device-room" placeholder="Ej: Living">
+                </div>
+                <div class="form-group">
+                    <label>Direccion (hex)</label>
+                    <input type="text" id="somfy-address" placeholder="Ej: 1A2B3C" maxlength="6">
+                    <small>Direccion unica de 24 bits. Se genera automaticamente.</small>
+                </div>
+                <div class="form-group">
+                    <label>Rolling Code inicial</label>
+                    <input type="number" id="somfy-rolling-code" value="0" min="0">
+                    <small>Normalmente 0 para dispositivos nuevos.</small>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('modal-add-somfy')">Cancelar</button>
+                <button class="btn btn-somfy" onclick="addSomfyDevice()">Agregar Somfy</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: Emparejar Somfy -->
+    <div id="modal-somfy-pairing" class="modal">
+        <div class="modal-content">
+            <div class="modal-header somfy-header">
+                <h2>Emparejar Somfy RTS</h2>
+                <button class="modal-close" onclick="closeModal('modal-somfy-pairing')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="somfy-pairing-id">
+                <div class="pairing-steps">
+                    <h3>Pasos para emparejar:</h3>
+                    <ol>
+                        <li>Localiza el boton <strong>PROG</strong> en tu control Somfy original (puede estar detras de la tapa)</li>
+                        <li>Manten presionado <strong>PROG</strong> hasta que la cortina se mueva brevemente (aprox 3 seg)</li>
+                        <li>Inmediatamente, presiona el boton "Enviar PROG" de abajo</li>
+                        <li>Si la cortina se mueve de nuevo, el emparejamiento fue exitoso!</li>
+                    </ol>
+                </div>
+                <div class="pairing-info">
+                    <p><strong>Dispositivo:</strong> <span id="somfy-pairing-device">--</span></p>
+                    <p><strong>Direccion:</strong> <span id="somfy-pairing-address">--</span></p>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('modal-somfy-pairing')">Cancelar</button>
+                <button class="btn btn-somfy btn-large" onclick="sendSomfyProgCommand()">Enviar PROG</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: Agregar Dooya Bidireccional -->
+    <div id="modal-add-dooya" class="modal">
+        <div class="modal-content">
+            <div class="modal-header dooya-header">
+                <h2>Agregar Cortina Dooya DDxxxx</h2>
+                <button class="modal-close" onclick="closeModal('modal-add-dooya')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="dooya-info">
+                    <p>Las cortinas Dooya DDxxxx bidireccionales usan FSK encriptado. Solo necesitas configurar el ID y emparejar.</p>
+                </div>
+                <div class="form-group">
+                    <label>Nombre</label>
+                    <input type="text" id="dooya-device-name" placeholder="Ej: Cortina Dormitorio">
+                </div>
+                <div class="form-group">
+                    <label>Habitacion (opcional)</label>
+                    <input type="text" id="dooya-device-room" placeholder="Ej: Dormitorio">
+                </div>
+                <div class="form-group">
+                    <label>Device ID (hex, 7 digitos)</label>
+                    <input type="text" id="dooya-device-id" placeholder="Ej: 1020304" maxlength="7">
+                    <small>ID unico de 28 bits. Se genera automaticamente.</small>
+                </div>
+                <div class="form-group">
+                    <label>Unit Code (0-15)</label>
+                    <select id="dooya-unit-code">
+                        <option value="0">0 - Grupo (todas las unidades)</option>
+                        <option value="1" selected>1 - Unidad 1</option>
+                        <option value="2">2 - Unidad 2</option>
+                        <option value="3">3 - Unidad 3</option>
+                        <option value="4">4 - Unidad 4</option>
+                        <option value="5">5 - Unidad 5</option>
+                        <option value="6">6 - Unidad 6</option>
+                        <option value="7">7 - Unidad 7</option>
+                        <option value="8">8 - Unidad 8</option>
+                        <option value="9">9 - Unidad 9</option>
+                        <option value="10">10 - Unidad 10</option>
+                        <option value="11">11 - Unidad 11</option>
+                        <option value="12">12 - Unidad 12</option>
+                        <option value="13">13 - Unidad 13</option>
+                        <option value="14">14 - Unidad 14</option>
+                        <option value="15">15 - Unidad 15</option>
+                    </select>
+                    <small>El control DD2702H soporta hasta 15 canales.</small>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('modal-add-dooya')">Cancelar</button>
+                <button class="btn btn-dooya" onclick="addDooyaBidirDevice()">Agregar Dooya</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: Emparejar Dooya -->
+    <div id="modal-dooya-pairing" class="modal">
+        <div class="modal-content">
+            <div class="modal-header dooya-header">
+                <h2>Emparejar Dooya DDxxxx</h2>
+                <button class="modal-close" onclick="closeModal('modal-dooya-pairing')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="dooya-pairing-id">
+                <div class="pairing-steps">
+                    <h3>Pasos para emparejar:</h3>
+                    <ol>
+                        <li>Abre la tapa trasera del control Dooya original</li>
+                        <li>Presiona el boton <strong>P2</strong> dos veces hasta que el motor se mueva</li>
+                        <li>Inmediatamente, presiona "Enviar P2" de abajo</li>
+                        <li>Si el motor se mueve de nuevo, el emparejamiento fue exitoso!</li>
+                    </ol>
+                </div>
+                <div class="pairing-info">
+                    <p><strong>Dispositivo:</strong> <span id="dooya-pairing-device">--</span></p>
+                    <p><strong>Frame de emparejamiento:</strong></p>
+                    <div class="frame-display" id="dooya-pairing-frame">--</div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('modal-dooya-pairing')">Cancelar</button>
+                <button class="btn btn-dooya btn-large" onclick="sendDooyaProgCommand()">Enviar P2</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notifications -->
+    <div id="toast-container"></div>
+
+    <!-- Demo Console -->
+    <div id="demo-console" class="demo-console">
+        <div class="demo-console-header">
+            <span>Consola Serial (Simulada)</span>
+            <button class="demo-console-toggle" onclick="toggleConsole()">Minimizar</button>
+        </div>
+        <div id="console-output"></div>
+    </div>
+
+    <script src="demo.js"></script>
+</body>
+</html>

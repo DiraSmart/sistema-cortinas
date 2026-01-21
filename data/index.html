@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dirasmart - RF Controller</title>
+    <link rel="icon" type="image/png" sizes="32x32" href="img/favicon-32x32.png">
+    <meta name="theme-color" content="#1A2634">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-brand">
+                <img src="img/dirasmart-logo.png" alt="Dirasmart" class="header-logo">
+                <h1>RF Controller</h1>
+            </div>
+            <div class="status-bar">
+                <span id="wifi-status" class="status-indicator">WiFi: --</span>
+                <span id="rf-status" class="status-indicator">RF: --</span>
+                <span id="time-display">--:--</span>
+            </div>
+        </header>
+
+        <!-- Navigation -->
+        <nav class="nav-tabs">
+            <button class="tab-btn active" data-tab="devices">Dispositivos</button>
+            <button class="tab-btn" data-tab="capture">Capturar</button>
+            <button class="tab-btn" data-tab="config">Configuración</button>
+            <button class="tab-btn" data-tab="backup">Backup</button>
+        </nav>
+
+        <!-- Tab Content -->
+        <main class="content">
+            <!-- Dispositivos Tab -->
+            <section id="devices-tab" class="tab-content active">
+                <div class="section-header">
+                    <h2>Mis Dispositivos</h2>
+                    <button class="btn btn-primary" onclick="showAddDeviceModal()">+ Agregar</button>
+                </div>
+
+                <div class="filter-bar">
+                    <select id="filter-type" onchange="filterDevices()">
+                        <option value="">Todos los tipos</option>
+                        <option value="1">Cortinas</option>
+                        <option value="2">Interruptores</option>
+                        <option value="3">Botones</option>
+                        <option value="4">Portones</option>
+                        <option value="5">Luces</option>
+                        <option value="6">Ventiladores</option>
+                        <option value="7">Dimmers</option>
+                        <option value="99">Otros</option>
+                    </select>
+                    <select id="filter-room" onchange="filterDevices()">
+                        <option value="">Todas las habitaciones</option>
+                    </select>
+                </div>
+
+                <div id="devices-list" class="devices-grid">
+                    <!-- Dispositivos se cargan dinámicamente -->
+                </div>
+            </section>
+
+            <!-- Capturar Tab -->
+            <section id="capture-tab" class="tab-content">
+                <div class="capture-panel">
+                    <h2>Capturar Señal RF</h2>
+
+                    <!-- Paso 1: Seleccionar dispositivo y función -->
+                    <div class="capture-target">
+                        <h3>1. Seleccionar destino</h3>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>Dispositivo</label>
+                                <select id="capture-device" onchange="updateCaptureSignalOptions()">
+                                    <option value="">-- Seleccionar --</option>
+                                    <!-- Se llena dinámicamente -->
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label>Función</label>
+                                <select id="capture-signal-slot">
+                                    <option value="">-- Primero selecciona dispositivo --</option>
+                                </select>
+                            </div>
+                        </div>
+                        <p class="help-text">Selecciona a qué dispositivo y función asignar la señal capturada</p>
+                    </div>
+
+                    <!-- Paso 2: Configuración RF -->
+                    <div class="capture-settings">
+                        <h3>2. Configuración RF</h3>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>Frecuencia (MHz)</label>
+                                <div class="frequency-selector">
+                                    <select id="capture-frequency">
+                                        <option value="433.92">433.92 MHz (Europa/Latam)</option>
+                                        <option value="315.00">315.00 MHz (USA/Asia)</option>
+                                        <option value="868.00">868.00 MHz (Europa)</option>
+                                        <option value="300.00">300.00 MHz</option>
+                                        <option value="303.87">303.87 MHz</option>
+                                        <option value="310.00">310.00 MHz</option>
+                                        <option value="390.00">390.00 MHz</option>
+                                        <option value="418.00">418.00 MHz</option>
+                                        <option value="915.00">915.00 MHz (USA)</option>
+                                        <option value="custom">Personalizada...</option>
+                                    </select>
+                                    <input type="number" id="custom-frequency" step="0.01" placeholder="MHz" style="display:none;">
+                                </div>
+                            </div>
+
+                            <div class="form-group">
+                                <label>Modulación</label>
+                                <select id="capture-modulation">
+                                    <option value="2">ASK/OOK (más común)</option>
+                                    <option value="0">2-FSK</option>
+                                    <option value="1">GFSK</option>
+                                    <option value="3">4-FSK</option>
+                                    <option value="4">MSK</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="form-group">
+                            <label>
+                                <input type="checkbox" id="auto-detect" checked> Detección automática de frecuencia
+                            </label>
+                            <small>Escanea frecuencias comunes para encontrar la señal</small>
+                        </div>
+                    </div>
+
+                    <!-- Paso 3: Capturar -->
+                    <div class="capture-action-section">
+                        <h3>3. Capturar</h3>
+                        <div class="capture-controls">
+                            <button id="btn-start-capture" class="btn btn-large btn-success" onclick="startCapture()">
+                                Iniciar Captura
+                            </button>
+                            <button id="btn-stop-capture" class="btn btn-large btn-danger" onclick="stopCapture()" style="display:none;">
+                                Detener
+                            </button>
+                        </div>
+
+                        <div id="capture-status" class="capture-status">
+                            <div class="status-icon"></div>
+                            <p>Presiona el botón de tu control remoto</p>
+                        </div>
+                    </div>
+
+                    <!-- Resultado -->
+                    <div id="capture-result" class="capture-result" style="display:none;">
+                        <h3>Señal Capturada</h3>
+                        <div class="signal-info">
+                            <p><strong>Longitud:</strong> <span id="signal-length">--</span> bytes</p>
+                            <p><strong>Frecuencia:</strong> <span id="signal-frequency">--</span> MHz</p>
+                            <p><strong>Modulación:</strong> <span id="signal-modulation">--</span></p>
+                            <p><strong>Protocolo detectado:</strong> <span id="signal-protocol">--</span></p>
+                        </div>
+                        <div class="signal-analysis">
+                            <h4>Análisis de señal</h4>
+                            <pre id="signal-analysis"></pre>
+                        </div>
+                        <div class="capture-actions">
+                            <button class="btn btn-primary" onclick="testCapturedSignal()">Probar Señal</button>
+                            <button class="btn btn-success" onclick="saveCurrentCapture()">Guardar</button>
+                            <button class="btn btn-secondary" onclick="clearCapture()">Nueva Captura</button>
+                        </div>
+                    </div>
+
+                    <!-- Opción de solo identificar -->
+                    <div class="identify-section">
+                        <h3>Solo identificar señal</h3>
+                        <p>Captura una señal sin guardarla, solo para ver su análisis</p>
+                        <button class="btn btn-secondary" onclick="identifySignal()">Identificar Señal</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Configuración Tab -->
+            <section id="config-tab" class="tab-content">
+                <div class="config-sections">
+                    <!-- WiFi -->
+                    <div class="config-section">
+                        <h3>Conexión WiFi</h3>
+                        <div class="form-group">
+                            <label>Red WiFi</label>
+                            <div class="wifi-select">
+                                <select id="wifi-ssid">
+                                    <option value="">Seleccionar red...</option>
+                                </select>
+                                <button class="btn btn-small" onclick="scanWiFi()">Buscar</button>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>Contraseña</label>
+                            <input type="password" id="wifi-password" placeholder="Contraseña WiFi">
+                        </div>
+                        <button class="btn btn-primary" onclick="connectWiFi()">Conectar</button>
+                    </div>
+
+                    <!-- MQTT -->
+                    <div class="config-section">
+                        <h3>MQTT (Home Assistant)</h3>
+                        <div class="form-group">
+                            <label>
+                                <input type="checkbox" id="mqtt-enabled"> Habilitar MQTT
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label>Servidor MQTT</label>
+                            <input type="text" id="mqtt-server" placeholder="192.168.1.100">
+                        </div>
+                        <div class="form-group">
+                            <label>Puerto</label>
+                            <input type="number" id="mqtt-port" value="1883">
+                        </div>
+                        <div class="form-group">
+                            <label>Usuario (opcional)</label>
+                            <input type="text" id="mqtt-user" placeholder="Usuario">
+                        </div>
+                        <div class="form-group">
+                            <label>Contraseña (opcional)</label>
+                            <input type="password" id="mqtt-password" placeholder="Contraseña">
+                        </div>
+                        <div class="form-group">
+                            <label>
+                                <input type="checkbox" id="mqtt-discovery" checked> Auto-discovery Home Assistant
+                            </label>
+                        </div>
+                    </div>
+
+                    <!-- Zona Horaria -->
+                    <div class="config-section">
+                        <h3>Fecha y Hora</h3>
+                        <div class="form-group">
+                            <label>Zona Horaria</label>
+                            <select id="timezone">
+                                <option value="America/Argentina/Buenos_Aires">Argentina (GMT-3)</option>
+                                <option value="America/Santiago">Chile (GMT-4/-3)</option>
+                                <option value="America/Bogota">Colombia (GMT-5)</option>
+                                <option value="America/Mexico_City">México (GMT-6)</option>
+                                <option value="America/Lima">Perú (GMT-5)</option>
+                                <option value="America/Caracas">Venezuela (GMT-4)</option>
+                                <option value="Europe/Madrid">España (GMT+1/+2)</option>
+                                <option value="America/New_York">USA Este (GMT-5/-4)</option>
+                                <option value="America/Los_Angeles">USA Oeste (GMT-8/-7)</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Servidor NTP</label>
+                            <input type="text" id="ntp-server" value="pool.ntp.org">
+                        </div>
+                    </div>
+
+                    <!-- RF por defecto -->
+                    <div class="config-section">
+                        <h3>Configuración RF</h3>
+                        <div class="form-group">
+                            <label>Frecuencia por defecto</label>
+                            <select id="default-frequency">
+                                <option value="433.92">433.92 MHz</option>
+                                <option value="315.00">315.00 MHz</option>
+                                <option value="868.00">868.00 MHz</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>
+                                <input type="checkbox" id="auto-detect-enabled" checked> Detección automática habilitada
+                            </label>
+                        </div>
+                    </div>
+
+                    <!-- Sistema -->
+                    <div class="config-section">
+                        <h3>Sistema</h3>
+                        <div class="form-group">
+                            <label>Nombre del dispositivo</label>
+                            <input type="text" id="device-name" value="RF_Controller">
+                        </div>
+                        <div class="system-info">
+                            <p><strong>IP:</strong> <span id="system-ip">--</span></p>
+                            <p><strong>Uptime:</strong> <span id="system-uptime">--</span></p>
+                            <p><strong>Memoria libre:</strong> <span id="system-heap">--</span></p>
+                        </div>
+                    </div>
+
+                    <div class="config-actions">
+                        <button class="btn btn-primary btn-large" onclick="saveConfig()">Guardar Configuración</button>
+                        <button class="btn btn-secondary" onclick="loadConfig()">Recargar</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Backup Tab -->
+            <section id="backup-tab" class="tab-content">
+                <div class="backup-section">
+                    <h3>Respaldo de Configuración</h3>
+                    <p>Exporta toda tu configuración y dispositivos guardados.</p>
+                    <button class="btn btn-primary btn-large" onclick="downloadBackup()">
+                        Descargar Backup
+                    </button>
+                </div>
+
+                <div class="backup-section">
+                    <h3>Restaurar Backup</h3>
+                    <p>Restaura configuración desde un archivo de backup.</p>
+                    <div class="file-upload">
+                        <input type="file" id="backup-file" accept=".json">
+                        <label for="backup-file" class="btn btn-secondary">Seleccionar archivo</label>
+                    </div>
+                    <button class="btn btn-warning btn-large" onclick="restoreBackup()">
+                        Restaurar Backup
+                    </button>
+                </div>
+
+                <div class="backup-section danger-zone">
+                    <h3>Zona de Peligro</h3>
+                    <button class="btn btn-danger" onclick="confirmReboot()">Reiniciar Dispositivo</button>
+                    <button class="btn btn-danger" onclick="confirmFactoryReset()">Restaurar de Fábrica</button>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Modal: Agregar Dispositivo -->
+    <div id="modal-add-device" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Agregar Dispositivo</h2>
+                <button class="modal-close" onclick="closeModal('modal-add-device')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>Nombre</label>
+                    <input type="text" id="new-device-name" placeholder="Ej: Cortina Living">
+                </div>
+                <div class="form-group">
+                    <label>Tipo de dispositivo</label>
+                    <select id="new-device-type" onchange="showDeviceTypeInfo(this.value)">
+                        <option value="1">Cortina (Abrir / Cerrar / Parar)</option>
+                        <option value="2">Interruptor (On / Off)</option>
+                        <option value="3">Botón (Pulsar)</option>
+                        <option value="4">Portón (Toggle o Abrir/Cerrar)</option>
+                        <option value="5">Luz (On / Off)</option>
+                        <option value="6">Ventilador (On / Off / Velocidad)</option>
+                        <option value="7">Dimmer (On / Off / + / -)</option>
+                        <option value="99">Otro (Personalizado)</option>
+                    </select>
+                    <small id="device-type-info" class="help-text">3 señales: Abrir, Cerrar, Parar</small>
+                </div>
+                <div class="form-group">
+                    <label>Habitación (opcional)</label>
+                    <input type="text" id="new-device-room" placeholder="Ej: Living">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('modal-add-device')">Cancelar</button>
+                <button class="btn btn-primary" onclick="addDevice()">Agregar</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: Editar Dispositivo -->
+    <div id="modal-edit-device" class="modal">
+        <div class="modal-content modal-large">
+            <div class="modal-header">
+                <h2>Editar Dispositivo</h2>
+                <button class="modal-close" onclick="closeModal('modal-edit-device')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="edit-device-id">
+                <div class="form-group">
+                    <label>Nombre</label>
+                    <input type="text" id="edit-device-name">
+                </div>
+                <div class="form-group">
+                    <label>Tipo de dispositivo</label>
+                    <select id="edit-device-type">
+                        <option value="1">Cortina (Abrir / Cerrar / Parar)</option>
+                        <option value="2">Interruptor (On / Off)</option>
+                        <option value="3">Botón (Pulsar)</option>
+                        <option value="4">Portón (Toggle o Abrir/Cerrar)</option>
+                        <option value="5">Luz (On / Off)</option>
+                        <option value="6">Ventilador (On / Off / Velocidad)</option>
+                        <option value="7">Dimmer (On / Off / + / -)</option>
+                        <option value="99">Otro (Personalizado)</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Habitación</label>
+                    <input type="text" id="edit-device-room">
+                </div>
+
+                <h3>Señales Guardadas</h3>
+                <div id="device-signals" class="signals-list">
+                    <!-- Señales se cargan dinámicamente -->
+                </div>
+
+                <div class="add-signal-section">
+                    <h4>Agregar Nueva Señal</h4>
+                    <p>Ve a la pestaña "Capturar" para grabar una nueva señal, luego vuelve aquí para guardarla.</p>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-danger" onclick="deleteDevice()">Eliminar Dispositivo</button>
+                <button class="btn btn-secondary" onclick="closeModal('modal-edit-device')">Cancelar</button>
+                <button class="btn btn-primary" onclick="updateDevice()">Guardar Cambios</button>
+            </div>
+        </div>
+    </div>
+
+
+    <!-- Toast Notifications -->
+    <div id="toast-container"></div>
+
+    <script src="app.js"></script>
+</body>
+</html>

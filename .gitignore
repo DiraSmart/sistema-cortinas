@@ -1,0 +1,59 @@
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# VSCode
+.vscode/
+*.code-workspace
+
+# Build output
+.build/
+build/
+
+# Compiled files
+*.o
+*.obj
+*.elf
+*.bin
+*.hex
+
+# IDE specific
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+*~
+
+# Backup files
+*.bak
+*.backup
+
+# Node modules (if using for demo)
+node_modules/
+
+# Environment files with secrets
+.env
+.env.local
+secrets.h
+
+# LittleFS data partition image
+data.bin
+littlefs.bin
+spiffs.bin
