@@ -26,11 +26,14 @@ public:
     bool updateDevice(const char* id, const SavedDevice* device);
     bool deleteDevice(const char* id);
     bool getDevice(const char* id, SavedDevice* device);
+    uint8_t getDeviceCount();
+    bool getDeviceByIndex(uint8_t index, SavedDevice* device);
 
     // Señales RF
     bool saveSignalToDevice(const char* deviceId, uint8_t signalIndex,
                             const RFSignal* signal, const char* signalName);
     bool deleteSignalFromDevice(const char* deviceId, uint8_t signalIndex);
+    bool updateSignalRepeatCount(const char* deviceId, uint8_t signalIndex, uint8_t repeatCount);
 
     // Somfy RTS
     bool updateSomfyRollingCode(const char* deviceId, uint16_t newRollingCode);

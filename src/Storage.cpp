@@ -36,9 +36,10 @@ bool StorageManager::format() {
 void StorageManager::setDefaultConfig(SystemConfig* config) {
     memset(config, 0, sizeof(SystemConfig));
 
-    strcpy(config->wifi_ssid, "");
-    strcpy(config->wifi_password, "");
-    config->wifi_configured = false;
+    // WiFi por defecto: dirasmart / dirasmart1
+    strcpy(config->wifi_ssid, DEFAULT_WIFI_SSID);
+    strcpy(config->wifi_password, DEFAULT_WIFI_PASSWORD);
+    config->wifi_configured = true;  // Intentar conectar por defecto
 
     strcpy(config->mqtt_server, "");
     config->mqtt_port = MQTT_PORT;
@@ -50,7 +51,7 @@ void StorageManager::setDefaultConfig(SystemConfig* config) {
 
     strcpy(config->timezone, DEFAULT_TIMEZONE);
     strcpy(config->ntp_server, DEFAULT_NTP_SERVER);
-    config->utc_offset = -3; // Argentina
+    config->utc_offset = -5; // Colombia/Peru (GMT-5)
     config->dst_enabled = false;
 
     config->default_frequency = RF_DEFAULT_FREQUENCY;
@@ -177,67 +178,138 @@ bool StorageManager::saveDevices(const SavedDevice* devices, uint8_t count) {
 }
 
 bool StorageManager::addDevice(const SavedDevice* device) {
-    SavedDevice devices[MAX_DEVICES];
-    uint8_t count = 0;
+    if (!initialized) return false;
 
-    loadDevices(devices, &count);
+    // Leer archivo JSON existente
+    DynamicJsonDocument doc(JSON_BUFFER_SIZE);
 
-    if (count >= MAX_DEVICES) {
+    if (fileExists(DEVICES_FILE)) {
+        File file = LittleFS.open(DEVICES_FILE, "r");
+        if (file) {
+            deserializeJson(doc, file);
+            file.close();
+        }
+    }
+
+    JsonArray arr = doc.is<JsonArray>() ? doc.as<JsonArray>() : doc.to<JsonArray>();
+
+    if (arr.size() >= MAX_DEVICES) {
         Serial.println("[Storage] Máximo de dispositivos alcanzado");
         return false;
     }
 
-    memcpy(&devices[count], device, sizeof(SavedDevice));
-    count++;
+    // Agregar nuevo dispositivo al JSON
+    JsonObject obj = arr.createNestedObject();
+    deviceToJson(obj, device);
 
-    return saveDevices(devices, count);
+    // Guardar
+    File file = LittleFS.open(DEVICES_FILE, "w");
+    if (!file) {
+        Serial.println("[Storage] Error al guardar dispositivo");
+        return false;
+    }
+
+    serializeJson(doc, file);
+    file.close();
+
+    Serial.printf("[Storage] Dispositivo agregado: %s\n", device->name);
+    return true;
 }
 
 bool StorageManager::updateDevice(const char* id, const SavedDevice* device) {
-    SavedDevice devices[MAX_DEVICES];
-    uint8_t count = 0;
+    if (!initialized || !fileExists(DEVICES_FILE)) return false;
 
-    loadDevices(devices, &count);
+    // Leer archivo JSON
+    File file = LittleFS.open(DEVICES_FILE, "r");
+    if (!file) return false;
 
-    for (uint8_t i = 0; i < count; i++) {
-        if (strcmp(devices[i].id, id) == 0) {
-            memcpy(&devices[i], device, sizeof(SavedDevice));
-            return saveDevices(devices, count);
+    DynamicJsonDocument doc(JSON_BUFFER_SIZE);
+    DeserializationError error = deserializeJson(doc, file);
+    file.close();
+
+    if (error) return false;
+
+    JsonArray arr = doc.as<JsonArray>();
+    bool found = false;
+
+    for (size_t i = 0; i < arr.size(); i++) {
+        JsonObject obj = arr[i];
+        if (strcmp(obj["id"] | "", id) == 0) {
+            // Actualizar este dispositivo
+            deviceToJson(obj, device);
+            found = true;
+            break;
         }
     }
 
-    return false;
+    if (!found) return false;
+
+    // Guardar
+    file = LittleFS.open(DEVICES_FILE, "w");
+    if (!file) return false;
+
+    serializeJson(doc, file);
+    file.close();
+
+    Serial.printf("[Storage] Dispositivo actualizado: %s\n", id);
+    return true;
 }
 
 bool StorageManager::deleteDevice(const char* id) {
-    SavedDevice devices[MAX_DEVICES];
-    uint8_t count = 0;
+    if (!initialized || !fileExists(DEVICES_FILE)) return false;
 
-    loadDevices(devices, &count);
+    // Leer archivo JSON
+    File file = LittleFS.open(DEVICES_FILE, "r");
+    if (!file) return false;
 
-    for (uint8_t i = 0; i < count; i++) {
-        if (strcmp(devices[i].id, id) == 0) {
-            // Mover los siguientes dispositivos
-            for (uint8_t j = i; j < count - 1; j++) {
-                memcpy(&devices[j], &devices[j + 1], sizeof(SavedDevice));
-            }
-            count--;
-            return saveDevices(devices, count);
+    DynamicJsonDocument doc(JSON_BUFFER_SIZE);
+    DeserializationError error = deserializeJson(doc, file);
+    file.close();
+
+    if (error) return false;
+
+    JsonArray arr = doc.as<JsonArray>();
+    bool found = false;
+
+    for (size_t i = 0; i < arr.size(); i++) {
+        JsonObject obj = arr[i];
+        if (strcmp(obj["id"] | "", id) == 0) {
+            arr.remove(i);
+            found = true;
+            break;
         }
     }
 
-    return false;
+    if (!found) return false;
+
+    // Guardar
+    file = LittleFS.open(DEVICES_FILE, "w");
+    if (!file) return false;
+
+    serializeJson(doc, file);
+    file.close();
+
+    Serial.printf("[Storage] Dispositivo eliminado: %s\n", id);
+    return true;
 }
 
 bool StorageManager::getDevice(const char* id, SavedDevice* device) {
-    SavedDevice devices[MAX_DEVICES];
-    uint8_t count = 0;
+    if (!initialized || !fileExists(DEVICES_FILE)) return false;
 
-    loadDevices(devices, &count);
+    File file = LittleFS.open(DEVICES_FILE, "r");
+    if (!file) return false;
 
-    for (uint8_t i = 0; i < count; i++) {
-        if (strcmp(devices[i].id, id) == 0) {
-            memcpy(device, &devices[i], sizeof(SavedDevice));
+    DynamicJsonDocument doc(JSON_BUFFER_SIZE);
+    DeserializationError error = deserializeJson(doc, file);
+    file.close();
+
+    if (error) return false;
+
+    JsonArray arr = doc.as<JsonArray>();
+
+    for (JsonObject obj : arr) {
+        if (strcmp(obj["id"] | "", id) == 0) {
+            jsonToDevice(obj, device);
             return true;
         }
     }
@@ -245,12 +317,58 @@ bool StorageManager::getDevice(const char* id, SavedDevice* device) {
     return false;
 }
 
+uint8_t StorageManager::getDeviceCount() {
+    if (!initialized || !fileExists(DEVICES_FILE)) return 0;
+
+    File file = LittleFS.open(DEVICES_FILE, "r");
+    if (!file) return 0;
+
+    DynamicJsonDocument doc(JSON_BUFFER_SIZE);
+    DeserializationError error = deserializeJson(doc, file);
+    file.close();
+
+    if (error) return 0;
+
+    JsonArray arr = doc.as<JsonArray>();
+    return arr.size();
+}
+
+bool StorageManager::getDeviceByIndex(uint8_t index, SavedDevice* device) {
+    if (!initialized || !fileExists(DEVICES_FILE)) return false;
+
+    File file = LittleFS.open(DEVICES_FILE, "r");
+    if (!file) return false;
+
+    DynamicJsonDocument doc(JSON_BUFFER_SIZE);
+    DeserializationError error = deserializeJson(doc, file);
+    file.close();
+
+    if (error) return false;
+
+    JsonArray arr = doc.as<JsonArray>();
+    if (index >= arr.size()) return false;
+
+    JsonObject obj = arr[index];
+    jsonToDevice(obj, device);
+    return true;
+}
+
 bool StorageManager::saveSignalToDevice(const char* deviceId, uint8_t signalIndex,
                                         const RFSignal* signal, const char* signalName) {
-    if (signalIndex >= 4) return false;
+    Serial.printf("[Storage] saveSignalToDevice: id=%s, index=%d, name=%s\n", deviceId, signalIndex, signalName);
+
+    if (signalIndex >= 4) {
+        Serial.println("[Storage] Error: signal index >= 4");
+        return false;
+    }
 
     SavedDevice device;
-    if (!getDevice(deviceId, &device)) return false;
+    if (!getDevice(deviceId, &device)) {
+        Serial.printf("[Storage] Error: device not found: %s\n", deviceId);
+        return false;
+    }
+
+    Serial.printf("[Storage] Device found: %s, current signalCount=%d\n", device.name, device.signalCount);
 
     memcpy(&device.signals[signalIndex], signal, sizeof(RFSignal));
     strncpy(device.signalNames[signalIndex], signalName, 31);
@@ -260,7 +378,13 @@ bool StorageManager::saveSignalToDevice(const char* deviceId, uint8_t signalInde
         device.signalCount = signalIndex + 1;
     }
 
-    return updateDevice(deviceId, &device);
+    Serial.printf("[Storage] Saving signal: valid=%d, len=%d, freq=%.2f\n",
+                  signal->valid, signal->length, signal->frequency);
+
+    bool result = updateDevice(deviceId, &device);
+    Serial.printf("[Storage] updateDevice result: %s\n", result ? "OK" : "FAILED");
+
+    return result;
 }
 
 bool StorageManager::deleteSignalFromDevice(const char* deviceId, uint8_t signalIndex) {
@@ -271,6 +395,27 @@ bool StorageManager::deleteSignalFromDevice(const char* deviceId, uint8_t signal
 
     memset(&device.signals[signalIndex], 0, sizeof(RFSignal));
     memset(device.signalNames[signalIndex], 0, 32);
+
+    return updateDevice(deviceId, &device);
+}
+
+bool StorageManager::updateSignalRepeatCount(const char* deviceId, uint8_t signalIndex, uint8_t repeatCount) {
+    if (signalIndex >= 4) return false;
+
+    SavedDevice device;
+    if (!getDevice(deviceId, &device)) return false;
+
+    if (!device.signals[signalIndex].valid) {
+        Serial.println("[Storage] Signal not valid, cannot update repeat count");
+        return false;
+    }
+
+    // Clamp repeat count between 1-20
+    if (repeatCount < 1) repeatCount = 1;
+    if (repeatCount > 20) repeatCount = 20;
+
+    device.signals[signalIndex].repeatCount = repeatCount;
+    Serial.printf("[Storage] Updated signal %d repeat count to %d\n", signalIndex, repeatCount);
 
     return updateDevice(deviceId, &device);
 }
@@ -298,14 +443,15 @@ String StorageManager::createBackup() {
         configToJson(configObj, &config);
     }
 
-    // Dispositivos
-    SavedDevice devices[MAX_DEVICES];
-    uint8_t count = 0;
-    if (loadDevices(devices, &count)) {
-        JsonArray devicesArr = doc.createNestedArray("devices");
-        for (uint8_t i = 0; i < count; i++) {
-            JsonObject obj = devicesArr.createNestedObject();
-            deviceToJson(obj, &devices[i]);
+    // Dispositivos - leer directamente del archivo
+    if (fileExists(DEVICES_FILE)) {
+        File file = LittleFS.open(DEVICES_FILE, "r");
+        if (file) {
+            DynamicJsonDocument devDoc(JSON_BUFFER_SIZE);
+            if (!deserializeJson(devDoc, file)) {
+                doc["devices"] = devDoc.as<JsonArray>();
+            }
+            file.close();
         }
     }
 
@@ -336,19 +482,13 @@ bool StorageManager::restoreBackup(const String& backupJson) {
         saveConfig(&config);
     }
 
-    // Restaurar dispositivos
+    // Restaurar dispositivos - guardar directamente el JSON
     if (doc.containsKey("devices")) {
-        JsonArray devicesArr = doc["devices"];
-        SavedDevice devices[MAX_DEVICES];
-        uint8_t count = 0;
-
-        for (JsonObject obj : devicesArr) {
-            if (count >= MAX_DEVICES) break;
-            jsonToDevice(obj, &devices[count]);
-            count++;
+        File file = LittleFS.open(DEVICES_FILE, "w");
+        if (file) {
+            serializeJson(doc["devices"], file);
+            file.close();
         }
-
-        saveDevices(devices, count);
     }
 
     Serial.println("[Storage] Backup restaurado");
@@ -444,6 +584,7 @@ void StorageManager::signalToJson(JsonObject& obj, const RFSignal* signal) {
     obj["deviation"] = signal->deviation;
     obj["timestamp"] = signal->timestamp;
     obj["valid"] = signal->valid;
+    obj["repeatCount"] = signal->repeatCount > 0 ? signal->repeatCount : RF_REPEAT_TRANSMIT;
 }
 
 void StorageManager::jsonToSignal(JsonObject& obj, RFSignal* signal) {
@@ -464,6 +605,7 @@ void StorageManager::jsonToSignal(JsonObject& obj, RFSignal* signal) {
     signal->deviation = obj["deviation"] | 0;
     signal->timestamp = obj["timestamp"] | 0;
     signal->valid = obj["valid"] | false;
+    signal->repeatCount = obj["repeatCount"] | RF_REPEAT_TRANSMIT;
 }
 
 void StorageManager::deviceToJson(JsonObject& obj, const SavedDevice* device) {
@@ -482,6 +624,9 @@ void StorageManager::deviceToJson(JsonObject& obj, const SavedDevice* device) {
     for (uint8_t i = 0; i < 4; i++) {
         JsonObject sigObj = signalsArr.createNestedObject();
         signalToJson(sigObj, &device->signals[i]);
+        // Add index and name for frontend compatibility
+        sigObj["index"] = i;
+        sigObj["name"] = device->signalNames[i];
         namesArr.add(device->signalNames[i]);
     }
 

@@ -158,9 +158,21 @@
                             <p><strong>Modulación:</strong> <span id="signal-modulation">--</span></p>
                             <p><strong>Protocolo detectado:</strong> <span id="signal-protocol">--</span></p>
                         </div>
+                        <div class="form-group">
+                            <label>Repeticiones de envío (1-20)</label>
+                            <input type="number" id="signal-repeat-count" value="5" min="1" max="20" step="1">
+                            <small class="help-text">Cantidad de veces que se repite la señal al transmitir</small>
+                        </div>
                         <div class="signal-analysis">
                             <h4>Análisis de señal</h4>
                             <pre id="signal-analysis"></pre>
+                        </div>
+                        <div class="signal-raw">
+                            <h4>Datos RAW (pulsos en µs)</h4>
+                            <div class="raw-data-container">
+                                <pre id="signal-raw-data"></pre>
+                            </div>
+                            <small class="help-text">Formato: duración_pulso (µs) - alternando HIGH/LOW</small>
                         </div>
                         <div class="capture-actions">
                             <button class="btn btn-primary" onclick="testCapturedSignal()">Probar Señal</button>
@@ -187,11 +199,16 @@
                         <div class="form-group">
                             <label>Red WiFi</label>
                             <div class="wifi-select">
-                                <select id="wifi-ssid">
+                                <select id="wifi-ssid" onchange="toggleManualSSID()">
                                     <option value="">Seleccionar red...</option>
+                                    <option value="__manual__">Ingresar manualmente...</option>
                                 </select>
                                 <button class="btn btn-small" onclick="scanWiFi()">Buscar</button>
                             </div>
+                        </div>
+                        <div class="form-group" id="manual-ssid-group" style="display:none;">
+                            <label>Nombre de red (SSID)</label>
+                            <input type="text" id="wifi-ssid-manual" placeholder="Nombre de la red WiFi">
                         </div>
                         <div class="form-group">
                             <label>Contraseña</label>
@@ -229,6 +246,7 @@
                                 <input type="checkbox" id="mqtt-discovery" checked> Auto-discovery Home Assistant
                             </label>
                         </div>
+                        <button class="btn btn-secondary" onclick="mqttRediscover()">Redescubrir dispositivos</button>
                     </div>
 
                     <!-- Zona Horaria -->

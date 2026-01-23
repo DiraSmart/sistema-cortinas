@@ -51,7 +51,7 @@ bool CC1101_RF::begin() {
 }
 
 bool CC1101_RF::isConnected() {
-    return connected && ELECHOUSE_cc1101.getCC1101();
+    return connected;  // Solo true si begin() fue exitoso
 }
 
 void CC1101_RF::setFrequency(float freq) {
@@ -86,19 +86,15 @@ bool CC1101_RF::startCapture() {
     captureComplete = false;
     memset((void*)captureBuffer, 0, RF_MAX_SIGNAL_LENGTH);
 
-    // Configurar para recepción
+    // Configurar para recepción pero NO iniciar todavía
+    // La captura real se inicia en captureSignal() con filtro RSSI
     configureReceiver();
-
-    // Habilitar interrupción
-    pinMode(CC1101_GDO0, INPUT);
-    attachInterrupt(digitalPinToInterrupt(CC1101_GDO0), handleInterrupt, CHANGE);
-
-    // Iniciar recepción
     ELECHOUSE_cc1101.SetRx();
-    capturing = true;
-    lastPulse = micros();
 
-    Serial.println("[RF] Captura iniciada...");
+    // NO adjuntar interrupt aquí - se hará en captureSignal() después del filtro RSSI
+    capturing = false;  // Marcar como preparado pero no capturando
+
+    Serial.println("[RF] Captura preparada (esperando señal fuerte)...");
     return true;
 }
 
@@ -126,13 +122,15 @@ void CC1101_RF::onInterrupt() {
     unsigned long duration = now - lastPulse;
     lastPulse = now;
 
+    // Debug: contar interrupciones (cada 100)
+    static volatile uint32_t intCount = 0;
+    intCount++;
+
     // Filtrar pulsos según configuración avanzada
-    // RF_MIN_PULSE_WIDTH = 50us para capturar pulsos cortos (Vertilux, etc.)
     if (duration < RF_MIN_PULSE_WIDTH) return;
 
     // Si el pulso es muy largo, puede ser fin de transmisión o gap
     if (duration > RF_MAX_PULSE_WIDTH) {
-        // Si ya tenemos suficientes pulsos, marcar como completo
         if (captureIndex >= RF_MIN_PULSES * 2) {
             captureComplete = true;
         }
@@ -155,20 +153,73 @@ bool CC1101_RF::captureSignal(RFSignal* signal, unsigned long timeout) {
     if (!connected) return false;
 
     unsigned long startTime = millis();
+    unsigned long lastPrint = 0;
+    bool signalDetected = false;
+    int stableCount = 0;
+    const int RSSI_THRESHOLD = -50;     // Señal fuerte requerida
+    const int STABLE_READINGS = 3;      // Lecturas consecutivas necesarias
 
-    // Iniciar captura
-    if (!startCapture()) return false;
+    // Configurar para recepción
+    configureReceiver();
+    ELECHOUSE_cc1101.SetRx();
 
-    // Esperar señal o timeout
-    while (!captureComplete && (millis() - startTime) < timeout) {
+    Serial.printf("[RF] Esperando señal fuerte (RSSI > %d)...\n", RSSI_THRESHOLD);
+    Serial.println("[RF] Presione el control cerca del receptor");
+
+    // Fase 1: Esperar señal fuerte y estable antes de capturar
+    while ((millis() - startTime) < timeout) {
+        int rssi = getRSSI();
+
+        // Imprimir RSSI cada 500ms para debug
+        if (millis() - lastPrint > 500) {
+            Serial.printf("[RF] RSSI: %d dBm\n", rssi);
+            lastPrint = millis();
+        }
+
+        if (rssi > RSSI_THRESHOLD) {
+            stableCount++;
+            if (stableCount >= STABLE_READINGS && !signalDetected) {
+                signalDetected = true;
+                Serial.printf("[RF] Señal estable detectada! RSSI: %d - Capturando...\n", rssi);
+
+                // Ahora sí iniciar captura
+                captureIndex = 0;
+                captureComplete = false;
+                memset((void*)captureBuffer, 0, RF_MAX_SIGNAL_LENGTH);
+                pinMode(CC1101_GDO0, INPUT);
+                attachInterrupt(digitalPinToInterrupt(CC1101_GDO0), handleInterrupt, CHANGE);
+                capturing = true;
+                lastPulse = micros();
+            }
+        } else {
+            stableCount = 0;  // Reset si la señal baja
+        }
+
+        // Si ya estamos capturando y tenemos suficientes pulsos, terminar
+        if (capturing && captureIndex >= RF_MIN_PULSES * 2) {
+            // Esperar un poco más para capturar la señal completa
+            delay(100);
+            break;
+        }
+
+        // Si la señal desapareció después de capturar algo
+        if (signalDetected && rssi < -70 && captureIndex > 20) {
+            Serial.println("[RF] Señal terminada");
+            break;
+        }
+
         delay(10);
     }
 
     // Detener captura
-    stopCapture();
+    if (capturing) {
+        capturing = false;
+        detachInterrupt(digitalPinToInterrupt(CC1101_GDO0));
+    }
+    ELECHOUSE_cc1101.setSidle();
 
-    if (captureComplete && captureIndex > 10) {
-        // Copiar datos capturados
+    // Verificar resultado
+    if (captureIndex > 20) {
         memcpy(signal->data, (void*)captureBuffer, captureIndex);
         signal->length = captureIndex;
         signal->frequency = currentFrequency;
@@ -184,7 +235,8 @@ bool CC1101_RF::captureSignal(RFSignal* signal, unsigned long timeout) {
     }
 
     signal->valid = false;
-    Serial.println("[RF] Timeout de captura");
+    Serial.printf("[RF] Timeout - pulsos: %d, señal detectada: %s\n",
+                  captureIndex, signalDetected ? "Sí" : "No");
     return false;
 }
 
@@ -195,38 +247,102 @@ bool CC1101_RF::transmitSignal(const RFSignal* signal, int repeats) {
 }
 
 bool CC1101_RF::transmitRaw(const uint8_t* data, uint16_t length, int repeats) {
-    if (!connected || length == 0) return false;
-
-    Serial.printf("[RF] Transmitiendo %d bytes, %d repeticiones...\n", length, repeats);
-
-    // Configurar para transmisión
-    configureTransmitter();
-    ELECHOUSE_cc1101.SetTx();
-
-    pinMode(CC1101_GDO0, OUTPUT);
-
-    for (int rep = 0; rep < repeats; rep++) {
-        // Reproducir señal
-        for (uint16_t i = 0; i < length - 1; i += 2) {
-            uint16_t duration = (data[i] << 8) | data[i + 1];
-
-            if (duration > 0 && duration < 50000) {
-                // Alternar estado
-                digitalWrite(CC1101_GDO0, (i / 2) % 2);
-                delayMicroseconds(duration);
-            }
-        }
-
-        // Pausa entre repeticiones
-        digitalWrite(CC1101_GDO0, LOW);
-        delay(10);
+    if (!connected || length == 0) {
+        Serial.printf("[RF] TX FAILED: connected=%d, length=%d\n", connected, length);
+        return false;
     }
 
-    // Volver a modo idle
-    ELECHOUSE_cc1101.setSidle();
-    pinMode(CC1101_GDO0, INPUT);
+    int pulseCount = length / 2;
+    Serial.printf("[RF] ========== TRANSMIT START ==========\n");
+    Serial.printf("[RF] TX: %d pulses, %d repeats, freq=%.2f MHz\n", pulseCount, repeats, currentFrequency);
 
-    Serial.println("[RF] Transmisión completada");
+    // Debug: show first pulse durations
+    Serial.print("[RF] Pulses (us): ");
+    for (int i = 0; i < min((int)length - 1, 20); i += 2) {
+        uint16_t dur = (data[i] << 8) | data[i + 1];
+        Serial.printf("%d ", dur);
+    }
+    Serial.println(length > 20 ? "..." : "");
+
+    // Step 1: Go to IDLE and reset
+    ELECHOUSE_cc1101.setSidle();
+    ELECHOUSE_cc1101.SpiStrobe(0x3A);  // SFRX - flush RX FIFO
+    ELECHOUSE_cc1101.SpiStrobe(0x3B);  // SFTX - flush TX FIFO
+    delay(5);
+
+    // Step 2: Full re-initialization for TX
+    ELECHOUSE_cc1101.Init();
+    ELECHOUSE_cc1101.setMHZ(currentFrequency);
+    ELECHOUSE_cc1101.setModulation(2);      // ASK/OOK
+    ELECHOUSE_cc1101.setPA(12);             // Max power (PA table index)
+    ELECHOUSE_cc1101.setCCMode(0);          // Transparent mode
+    ELECHOUSE_cc1101.setSyncMode(0);        // No sync
+    ELECHOUSE_cc1101.setCrc(0);             // No CRC
+    ELECHOUSE_cc1101.setDcFilterOff(1);     // DC filter off
+    ELECHOUSE_cc1101.setPktFormat(3);       // Async serial mode - GDO2 is TX data input!
+
+    // Step 3: Configure GDO2 (pin 12) as output for TX data
+    // In CC1101 async serial mode: GDO0=RX output, GDO2=TX input
+    pinMode(CC1101_GDO2, OUTPUT);
+    digitalWrite(CC1101_GDO2, LOW);
+    delay(1);
+
+    // Step 4: Enter TX mode
+    ELECHOUSE_cc1101.SetTx();  // Use library function
+    delay(5);  // Give time to enter TX mode
+
+    Serial.printf("[RF] Transmitting on GDO2 pin %d...\n", CC1101_GDO2);
+
+    // Step 5: Transmit the signal - try both polarities
+    // First half repeats: normal polarity (start HIGH)
+    // Second half repeats: inverted polarity (start LOW)
+    for (int rep = 0; rep < repeats; rep++) {
+        // Alternate polarity each repeat
+        bool startHigh = (rep % 2) == 0;
+
+        // Disable interrupts for precise timing
+        portDISABLE_INTERRUPTS();
+
+        bool currentLevel = startHigh;
+
+        // Transmit each pulse by toggling state
+        for (uint16_t i = 0; i + 1 < length; i += 2) {
+            uint16_t duration = (data[i] << 8) | data[i + 1];
+
+            // Skip invalid durations
+            if (duration == 0 || duration > 50000) continue;
+
+            // Set output level on GDO2
+            digitalWrite(CC1101_GDO2, currentLevel ? HIGH : LOW);
+
+            // Wait for duration
+            delayMicroseconds(duration);
+
+            // Toggle for next pulse
+            currentLevel = !currentLevel;
+        }
+
+        // Ensure carrier OFF at end
+        digitalWrite(CC1101_GDO2, LOW);
+
+        portENABLE_INTERRUPTS();
+
+        // Log each repeat
+        Serial.printf("[RF] Rep %d/%d (%s) complete\n", rep + 1, repeats, startHigh ? "normal" : "inverted");
+
+        // Gap between repetitions
+        if (rep < repeats - 1) {
+            delay(30);
+        }
+    }
+
+    // Step 6: Return to idle
+    digitalWrite(CC1101_GDO2, LOW);
+    delay(1);
+    ELECHOUSE_cc1101.setSidle();
+    pinMode(CC1101_GDO2, INPUT);
+
+    Serial.printf("[RF] ========== TRANSMIT COMPLETE ==========\n");
     return true;
 }
 
@@ -508,22 +624,38 @@ String CC1101_RF::getStatusString() {
 }
 
 void CC1101_RF::configureReceiver() {
-    ELECHOUSE_cc1101.setCCMode(1);
+    ELECHOUSE_cc1101.setCCMode(0);          // Raw mode (no packet handling)
     ELECHOUSE_cc1101.setModulation(currentModulation);
     ELECHOUSE_cc1101.setMHZ(currentFrequency);
-    ELECHOUSE_cc1101.setSyncMode(0);
-    ELECHOUSE_cc1101.setCrc(0);
-    ELECHOUSE_cc1101.setDcFilterOff(1);
-    ELECHOUSE_cc1101.setPktFormat(3);
+    ELECHOUSE_cc1101.setSyncMode(0);        // Sin sync word
+    ELECHOUSE_cc1101.setCrc(0);             // Sin CRC
+    ELECHOUSE_cc1101.setDcFilterOff(0);     // DC filter ON para mejor recepción
+    ELECHOUSE_cc1101.setPktFormat(3);       // Async serial mode
+
+    // Configurar GDO0 para salida de datos serial (0x0D = serial data output)
+    ELECHOUSE_cc1101.SpiWriteReg(0x02, 0x0D);  // IOCFG0 = Serial Data Output
+
+    Serial.println("[RF] Receiver configurado para async serial");
 }
 
 void CC1101_RF::configureTransmitter() {
-    ELECHOUSE_cc1101.setCCMode(1);
+    ELECHOUSE_cc1101.setSidle();  // Go to idle first
+    delay(1);
+
+    ELECHOUSE_cc1101.setCCMode(0);      // Raw mode (no packet handling)
     ELECHOUSE_cc1101.setModulation(currentModulation);
     ELECHOUSE_cc1101.setMHZ(currentFrequency);
-    ELECHOUSE_cc1101.setSyncMode(0);
-    ELECHOUSE_cc1101.setCrc(0);
-    ELECHOUSE_cc1101.setPktFormat(0);
+    ELECHOUSE_cc1101.setPA(10);         // Good TX power for 433MHz
+    ELECHOUSE_cc1101.setSyncMode(0);    // No sync word
+    ELECHOUSE_cc1101.setCrc(0);         // No CRC
+    ELECHOUSE_cc1101.setPktFormat(3);   // Async serial mode
+
+    // Configure GDO0 for async TX - 0x2D = serial synchronous data output, 0x2F = combined RSSI/LQI
+    // For async TX with manual control, we use tri-state (0x2E) or leave as is
+    ELECHOUSE_cc1101.SpiWriteReg(0x00, 0x2E);  // IOCFG2 = tri-state (not used)
+    ELECHOUSE_cc1101.SpiWriteReg(0x02, 0x06);  // IOCFG0 = sync serial clock output for TX
+
+    Serial.printf("[RF] TX configured: freq=%.2f, mod=%d, PA=10\n", currentFrequency, currentModulation);
 }
 
 bool CC1101_RF::waitForSignal(unsigned long timeout) {

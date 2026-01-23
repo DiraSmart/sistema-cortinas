@@ -4,6 +4,11 @@
 #include <Arduino.h>
 
 // ============================================
+// VERSION DEL FIRMWARE
+// ============================================
+#define FIRMWARE_VERSION    "1.2.0"
+
+// ============================================
 // CONFIGURACIÓN DE PINES ESP32 -> CC1101
 // ============================================
 #define CC1101_GDO0    13  // Pin de datos/interrupción
@@ -16,6 +21,11 @@
 // ============================================
 // CONFIGURACIÓN DE RED
 // ============================================
+// WiFi por defecto (si no se conecta, pasa a modo AP)
+#define DEFAULT_WIFI_SSID       "dirasmart"
+#define DEFAULT_WIFI_PASSWORD   "dirasmart1"
+
+// Access Point (modo fallback)
 #define AP_SSID         "RF_Controller"
 #define AP_PASSWORD     "12345678"
 #define AP_IP           IPAddress(192, 168, 4, 1)
@@ -186,6 +196,7 @@ struct RFSignal {
     int deviation;
     unsigned long timestamp;
     bool valid;
+    uint8_t repeatCount;    // Number of times to repeat transmission (1-20, default 5)
 };
 
 // ============================================
@@ -265,7 +276,7 @@ struct SystemConfig {
 // ============================================
 // CONFIGURACIÓN POR DEFECTO
 // ============================================
-#define DEFAULT_TIMEZONE        "America/Argentina/Buenos_Aires"
+#define DEFAULT_TIMEZONE        "America/Bogota"
 #define DEFAULT_NTP_SERVER      "pool.ntp.org"
 #define DEFAULT_DEVICE_NAME     "RF_Controller"
 
@@ -280,7 +291,7 @@ struct SystemConfig {
 // ============================================
 // TAMAÑOS DE BUFFER
 // ============================================
-#define JSON_BUFFER_SIZE        8192
+#define JSON_BUFFER_SIZE        16384  // Increased for multiple signals with large data
 #define WEB_BUFFER_SIZE         4096
 
 #endif // CONFIG_H

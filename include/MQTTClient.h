@@ -56,6 +56,11 @@ private:
     void subscribe();
     void handleMessage(char* topic, uint8_t* payload, unsigned int length);
     static void mqttCallback(char* topic, uint8_t* payload, unsigned int length);
+    void processDeviceCommand(const char* deviceId, const char* command);
+    void processSignalCommand(const char* deviceId, int signalIndex, const char* command);
+    void processSystemCommand(const char* command, const char* payload);
+    void publishSystemButtons();
+    void publishDiagnosticSensors();
 
     // Home Assistant Discovery
     void publishCoverDiscovery(const SavedDevice* device);

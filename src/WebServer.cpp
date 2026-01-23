@@ -1,8 +1,15 @@
-#include "WebServer.h"
+#include "WebServerManager.h"
+#include <LittleFS.h>
+#include <ElegantOTA.h>
+#include "SomfyRTS.h"
+#include "DooyaBidir.h"
+#include "MQTTClient.h"
 
 WebServerManager webServer;
 
-WebServerManager::WebServerManager() : server(80), ws("/ws") {
+WebServerManager::WebServerManager() {
+    server = nullptr;
+    tempCapturedSignal = nullptr;
     apMode = false;
     wifiConnected = false;
     lastReconnectAttempt = 0;
@@ -16,7 +23,10 @@ bool WebServerManager::begin(SystemConfig* config) {
     sysConfig = config;
     Serial.println("[Web] Iniciando servidor web...");
 
-    // Intentar conectar a WiFi si está configurado
+    // Crear instancias dinamicamente
+    server = new ::WebServer(80);
+    tempCapturedSignal = new RFSignal();
+
     if (config->wifi_configured && strlen(config->wifi_ssid) > 0) {
         if (connectWiFi(config->wifi_ssid, config->wifi_password)) {
             Serial.println("[Web] Conectado a WiFi");
@@ -28,20 +38,20 @@ bool WebServerManager::begin(SystemConfig* config) {
         startAP();
     }
 
-    // Configurar rutas y WebSocket
     setupRoutes();
-    setupWebSocket();
 
-    // Iniciar servidor
-    server.begin();
+    // Initialize ElegantOTA BEFORE server->begin()
+    ElegantOTA.begin(server);
+
+    server->begin();
     Serial.printf("[Web] Servidor iniciado en http://%s\n", getIPAddress().c_str());
+    Serial.printf("[Web] OTA disponible en http://%s/update\n", getIPAddress().c_str());
 
     return true;
 }
 
 void WebServerManager::stop() {
-    server.end();
-    ws.closeAll();
+    if (server) server->stop();
 }
 
 bool WebServerManager::startAP() {
@@ -58,10 +68,23 @@ bool WebServerManager::startAP() {
 }
 
 bool WebServerManager::connectWiFi(const char* ssid, const char* password) {
+    // Si ya está conectado al mismo SSID, no reconectar
+    if (WiFi.status() == WL_CONNECTED) {
+        String currentSSID = WiFi.SSID();
+        if (currentSSID == ssid) {
+            wifiConnected = true;
+            Serial.printf("[Web] Ya conectado a %s, IP: %s\n", ssid, WiFi.localIP().toString().c_str());
+            return true;
+        }
+    }
+
     Serial.printf("[Web] Conectando a WiFi: %s...\n", ssid);
 
-    WiFi.mode(WIFI_AP_STA);
-    WiFi.begin(ssid, password);
+    // No cambiar modo ni reconectar si ya está conectado
+    if (WiFi.status() != WL_CONNECTED) {
+        WiFi.mode(WIFI_STA);
+        WiFi.begin(ssid, password);
+    }
 
     unsigned long startTime = millis();
     while (WiFi.status() != WL_CONNECTED && (millis() - startTime) < 15000) {
@@ -111,19 +134,61 @@ int WebServerManager::getRSSI() {
 }
 
 void WebServerManager::loop() {
-    ws.cleanupClients();
+    static unsigned long wifiLostTime = 0;
+    static unsigned long apModeStartTime = 0;
+    static unsigned long lastReconnectTry = 0;
 
-    // Reconectar WiFi si se perdió la conexión
-    if (sysConfig->wifi_configured && !isConnected() && !apMode) {
-        if (millis() - lastReconnectAttempt > 30000) {
-            lastReconnectAttempt = millis();
+    if (!server || !sysConfig) return;
+
+    server->handleClient();
+    ElegantOTA.loop();
+
+    bool connected = isConnected();
+
+    // Si perdió WiFi
+    if (sysConfig->wifi_configured && !connected) {
+        if (wifiLostTime == 0) {
+            wifiLostTime = millis();
+            Serial.println("[Web] WiFi perdido, esperando 2 min antes de AP...");
+        }
+
+        // Si no está en modo AP y pasaron 2 minutos, encender AP
+        if (!apMode && (millis() - wifiLostTime > 120000)) {
+            Serial.println("[Web] Encendiendo modo AP...");
+            startAP();
+            apModeStartTime = millis();
+        }
+
+        // Si está en modo AP, intentar reconectar cada 30 segundos
+        if (apMode && (millis() - lastReconnectTry > 30000)) {
+            lastReconnectTry = millis();
             Serial.println("[Web] Intentando reconectar WiFi...");
-            connectWiFi(sysConfig->wifi_ssid, sysConfig->wifi_password);
+            WiFi.begin(sysConfig->wifi_ssid, sysConfig->wifi_password);
+        }
+
+        // Si lleva 30 minutos en modo AP sin reconectar, reiniciar
+        if (apMode && (millis() - apModeStartTime > 1800000)) {
+            Serial.println("[Web] 30 min sin WiFi, reiniciando...");
+            delay(1000);
+            ESP.restart();
         }
     }
 
-    // Verificar estado de captura
-    if (captureInProgress && !rfModule.isCapturing()) {
+    // Si reconectó WiFi
+    if (connected) {
+        wifiLostTime = 0;  // Reset timer
+        apModeStartTime = 0;
+
+        // Si está en modo AP, apagarlo
+        if (apMode) {
+            Serial.println("[Web] WiFi reconectado, apagando AP...");
+            WiFi.softAPdisconnect(true);
+            WiFi.mode(WIFI_STA);
+            apMode = false;
+        }
+    }
+
+    if (captureInProgress && rfModule.isConnected() && !rfModule.isCapturing()) {
         captureInProgress = false;
     }
 }
@@ -136,789 +201,904 @@ void WebServerManager::setSignalTransmitCallback(void (*callback)(const char* de
     onSignalTransmit = callback;
 }
 
+void WebServerManager::handleCORS() {
+    server->sendHeader("Access-Control-Allow-Origin", "*");
+    server->sendHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+    server->sendHeader("Access-Control-Allow-Headers", "Content-Type");
+}
+
 void WebServerManager::setupRoutes() {
-    // Servir archivos estáticos desde LittleFS
-    server.serveStatic("/", LittleFS, "/").setDefaultFile("index.html");
+    // Handler for CORS preflight OPTIONS requests
+    server->on("/api/config", HTTP_OPTIONS, [this]() { handleCORS(); server->send(204); });
+    server->on("/api/devices", HTTP_OPTIONS, [this]() { handleCORS(); server->send(204); });
+    server->on("/api/devices/update", HTTP_OPTIONS, [this]() { handleCORS(); server->send(204); });
+    server->on("/api/rf/signal/save", HTTP_OPTIONS, [this]() { handleCORS(); server->send(204); });
+    server->on("/api/rf/signal/delete", HTTP_OPTIONS, [this]() { handleCORS(); server->send(204); });
+    server->on("/api/rf/test", HTTP_OPTIONS, [this]() { handleCORS(); server->send(204); });
+    server->on("/api/signal/repeat", HTTP_OPTIONS, [this]() { handleCORS(); server->send(204); });
+    server->on("/api/restore", HTTP_OPTIONS, [this]() { handleCORS(); server->send(204); });
+    server->on("/api/wifi/connect", HTTP_OPTIONS, [this]() { handleCORS(); server->send(204); });
 
-    // Página principal
-    server.on("/", HTTP_GET, [this](AsyncWebServerRequest* request) {
-        handleRoot(request);
-    });
-
-    // ========== API REST ==========
-
-    // Estado del sistema
-    server.on("/api/status", HTTP_GET, [this](AsyncWebServerRequest* request) {
-        handleGetStatus(request);
-    });
-
-    // Configuración
-    server.on("/api/config", HTTP_GET, [this](AsyncWebServerRequest* request) {
-        handleGetConfig(request);
-    });
-
-    server.on("/api/config", HTTP_POST, [](AsyncWebServerRequest* request) {},
-        NULL, [this](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) {
-        handleSaveConfig(request, data, len);
-    });
-
-    // Dispositivos
-    server.on("/api/devices", HTTP_GET, [this](AsyncWebServerRequest* request) {
-        handleGetDevices(request);
-    });
-
-    server.on("/api/devices", HTTP_POST, [](AsyncWebServerRequest* request) {},
-        NULL, [this](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) {
-        handleAddDevice(request, data, len);
-    });
-
-    server.on("/api/devices/update", HTTP_POST, [](AsyncWebServerRequest* request) {},
-        NULL, [this](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) {
-        handleUpdateDevice(request, data, len);
-    });
-
-    server.on("/api/devices/delete", HTTP_GET, [this](AsyncWebServerRequest* request) {
-        handleDeleteDevice(request);
-    });
-
-    // Señales RF
-    server.on("/api/rf/transmit", HTTP_GET, [this](AsyncWebServerRequest* request) {
-        handleTransmitSignal(request);
-    });
-
-    server.on("/api/rf/capture/start", HTTP_GET, [this](AsyncWebServerRequest* request) {
-        handleStartCapture(request);
-    });
-
-    server.on("/api/rf/capture/stop", HTTP_GET, [this](AsyncWebServerRequest* request) {
-        handleStopCapture(request);
-    });
-
-    server.on("/api/rf/capture/get", HTTP_GET, [this](AsyncWebServerRequest* request) {
-        handleGetCapture(request);
-    });
-
-    server.on("/api/rf/signal/save", HTTP_POST, [](AsyncWebServerRequest* request) {},
-        NULL, [this](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) {
-        handleSaveSignal(request, data, len);
-    });
-
-    server.on("/api/rf/frequency", HTTP_GET, [this](AsyncWebServerRequest* request) {
-        handleSetFrequency(request);
-    });
-
-    server.on("/api/rf/scan", HTTP_GET, [this](AsyncWebServerRequest* request) {
-        handleScanFrequency(request);
-    });
-
-    // Backup/Restore
-    server.on("/api/backup", HTTP_GET, [this](AsyncWebServerRequest* request) {
-        handleBackup(request);
-    });
-
-    server.on("/api/restore", HTTP_POST, [](AsyncWebServerRequest* request) {},
-        NULL, [this](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) {
-        handleRestore(request, data, len);
-    });
-
-    // WiFi
-    server.on("/api/wifi/scan", HTTP_GET, [this](AsyncWebServerRequest* request) {
-        handleWiFiScan(request);
-    });
-
-    server.on("/api/wifi/connect", HTTP_POST, [](AsyncWebServerRequest* request) {},
-        NULL, [this](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) {
-        handleWiFiConnect(request, data, len);
-    });
-
-    // Sistema
-    server.on("/api/reboot", HTTP_GET, [this](AsyncWebServerRequest* request) {
-        handleReboot(request);
-    });
-
-    server.on("/api/factory-reset", HTTP_GET, [this](AsyncWebServerRequest* request) {
-        handleFactoryReset(request);
-    });
-
-    // 404
-    server.onNotFound([this](AsyncWebServerRequest* request) {
-        handleNotFound(request);
-    });
+    server->on("/", HTTP_GET, [this]() { handleRoot(); });
+    server->on("/api/status", HTTP_GET, [this]() { handleGetStatus(); });
+    server->on("/api/config", HTTP_GET, [this]() { handleGetConfig(); });
+    server->on("/api/config", HTTP_POST, [this]() { handleSaveConfig(); });
+    server->on("/api/devices", HTTP_GET, [this]() { handleGetDevices(); });
+    server->on("/api/devices", HTTP_POST, [this]() { handleAddDevice(); });
+    server->on("/api/devices/update", HTTP_POST, [this]() { handleUpdateDevice(); });
+    server->on("/api/devices/delete", HTTP_GET, [this]() { handleDeleteDevice(); });
+    server->on("/api/rf/transmit", HTTP_GET, [this]() { handleTransmitSignal(); });
+    server->on("/api/rf/capture/start", HTTP_GET, [this]() { handleStartCapture(); });
+    server->on("/api/rf/capture/stop", HTTP_GET, [this]() { handleStopCapture(); });
+    server->on("/api/rf/capture/get", HTTP_GET, [this]() { handleGetCapture(); });
+    server->on("/api/rf/signal/save", HTTP_POST, [this]() { handleSaveSignal(); });
+    server->on("/api/rf/signal/delete", HTTP_POST, [this]() { handleDeleteSignal(); });
+    server->on("/api/rf/test", HTTP_POST, [this]() { handleTestSignal(); });
+    server->on("/api/signal/repeat", HTTP_POST, [this]() { handleUpdateSignalRepeat(); });
+    server->on("/api/rf/frequency", HTTP_GET, [this]() { handleSetFrequency(); });
+    server->on("/api/rf/scan", HTTP_GET, [this]() { handleScanFrequency(); });
+    server->on("/api/backup", HTTP_GET, [this]() { handleBackup(); });
+    server->on("/api/restore", HTTP_POST, [this]() { handleRestore(); });
+    server->on("/api/wifi/scan", HTTP_GET, [this]() { handleWiFiScan(); });
+    server->on("/api/wifi/connect", HTTP_POST, [this]() { handleWiFiConnect(); });
+    server->on("/api/mqtt/rediscover", HTTP_POST, [this]() { handleMqttRediscover(); });
+    server->on("/api/reboot", HTTP_GET, [this]() { handleReboot(); });
+    server->on("/api/factory-reset", HTTP_GET, [this]() { handleFactoryReset(); });
+    server->onNotFound([this]() { handleNotFound(); });
 }
 
-void WebServerManager::setupWebSocket() {
-    ws.onEvent([this](AsyncWebSocket* server, AsyncWebSocketClient* client,
-                      AwsEventType type, void* arg, uint8_t* data, size_t len) {
-        onWsEvent(server, client, type, arg, data, len);
-    });
-
-    server.addHandler(&ws);
-}
-
-void WebServerManager::handleRoot(AsyncWebServerRequest* request) {
+void WebServerManager::handleRoot() {
     if (LittleFS.exists("/index.html")) {
-        request->send(LittleFS, "/index.html", "text/html");
+        File file = LittleFS.open("/index.html", "r");
+        server->streamFile(file, "text/html");
+        file.close();
     } else {
-        // Página de emergencia si no hay archivos
         String html = "<!DOCTYPE html><html><head><title>RF Controller</title>";
         html += "<meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>";
         html += "</head><body><h1>RF Controller</h1>";
-        html += "<p>Archivos web no encontrados. Suba los archivos a LittleFS.</p>";
+        html += "<p>Archivos web no encontrados. Suba los archivos al filesystem.</p>";
         html += "<p>IP: " + getIPAddress() + "</p>";
         html += "</body></html>";
-        request->send(200, "text/html", html);
+        server->send(200, "text/html", html);
     }
 }
 
-void WebServerManager::handleNotFound(AsyncWebServerRequest* request) {
-    request->send(404, "text/plain", "Not found");
+void WebServerManager::handleNotFound() {
+    // Handle CORS preflight for any unhandled OPTIONS request
+    if (server->method() == HTTP_OPTIONS) {
+        handleCORS();
+        server->send(204);
+        return;
+    }
+
+    String path = server->uri();
+    if (LittleFS.exists(path)) {
+        File file = LittleFS.open(path, "r");
+        server->streamFile(file, getContentType(path));
+        file.close();
+        return;
+    }
+    server->send(404, "text/plain", "Not found");
 }
 
-void WebServerManager::handleGetStatus(AsyncWebServerRequest* request) {
-    DynamicJsonDocument doc(1024);
+void WebServerManager::handleGetStatus() {
+    handleCORS();
 
+    StaticJsonDocument<512> doc;
     doc["wifi_connected"] = isConnected();
     doc["wifi_ssid"] = getSSID();
-    doc["wifi_rssi"] = getRSSI();
-    doc["ip"] = getIPAddress();
     doc["ap_mode"] = apMode;
-    doc["rf_connected"] = rfModule.isConnected();
-    doc["rf_frequency"] = rfModule.getFrequency();
-    doc["rf_rssi"] = rfModule.getRSSI();
-    doc["capturing"] = rfModule.isCapturing();
+    doc["ip"] = getIPAddress();
+    doc["rssi"] = getRSSI();
+
+    bool rfConnected = rfModule.isConnected();
+    doc["rf_connected"] = rfConnected;
+    doc["rf_frequency"] = rfConnected ? round(rfModule.getFrequency() * 100) / 100.0 : 0;
+    doc["rf_capturing"] = rfConnected ? rfModule.isCapturing() : false;
     doc["free_heap"] = ESP.getFreeHeap();
     doc["uptime"] = millis() / 1000;
+    doc["ota_url"] = "http://" + getIPAddress() + "/update";
+    doc["version"] = FIRMWARE_VERSION;
 
     String response;
     serializeJson(doc, response);
-    sendJsonResponse(request, 200, response);
+    sendJsonResponse(200, response);
 }
 
-void WebServerManager::handleGetConfig(AsyncWebServerRequest* request) {
-    DynamicJsonDocument doc(2048);
+void WebServerManager::handleGetConfig() {
+    handleCORS();
 
+    StaticJsonDocument<1024> doc;
     doc["wifi_ssid"] = sysConfig->wifi_ssid;
     doc["wifi_configured"] = sysConfig->wifi_configured;
+    doc["mqtt_enabled"] = sysConfig->mqtt_enabled;
     doc["mqtt_server"] = sysConfig->mqtt_server;
     doc["mqtt_port"] = sysConfig->mqtt_port;
     doc["mqtt_user"] = sysConfig->mqtt_user;
-    doc["mqtt_enabled"] = sysConfig->mqtt_enabled;
     doc["mqtt_discovery"] = sysConfig->mqtt_discovery;
-    doc["mqtt_client_id"] = sysConfig->mqtt_client_id;
-    doc["timezone"] = sysConfig->timezone;
     doc["ntp_server"] = sysConfig->ntp_server;
-    doc["utc_offset"] = sysConfig->utc_offset;
-    doc["dst_enabled"] = sysConfig->dst_enabled;
-    doc["default_frequency"] = sysConfig->default_frequency;
-    doc["default_modulation"] = sysConfig->default_modulation;
+    doc["timezone"] = sysConfig->timezone;
     doc["device_name"] = sysConfig->device_name;
-    doc["auto_detect_enabled"] = sysConfig->auto_detect_enabled;
-
-    // Lista de frecuencias disponibles
-    JsonArray freqs = doc.createNestedArray("frequencies");
-    for (int i = 0; i < RF_FREQUENCIES_COUNT; i++) {
-        freqs.add(RF_FREQUENCIES[i]);
-    }
+    doc["default_frequency"] = sysConfig->default_frequency;
 
     String response;
     serializeJson(doc, response);
-    sendJsonResponse(request, 200, response);
+    sendJsonResponse(200, response);
 }
 
-void WebServerManager::handleSaveConfig(AsyncWebServerRequest* request, uint8_t* data, size_t len) {
-    DynamicJsonDocument doc(2048);
-    DeserializationError error = deserializeJson(doc, (char*)data, len);
+void WebServerManager::handleSaveConfig() {
+    handleCORS();
 
-    if (error) {
-        sendJsonError(request, 400, "JSON inválido");
+    if (!server->hasArg("plain")) {
+        sendJsonError(400, "No data received");
         return;
     }
 
-    // Actualizar configuración
+    String body = server->arg("plain");
+    StaticJsonDocument<1024> doc;
+    DeserializationError error = deserializeJson(doc, body);
+
+    if (error) {
+        sendJsonError(400, "Invalid JSON");
+        return;
+    }
+
     if (doc.containsKey("wifi_ssid")) {
-        strncpy(sysConfig->wifi_ssid, doc["wifi_ssid"], 63);
+        strlcpy(sysConfig->wifi_ssid, doc["wifi_ssid"] | "", sizeof(sysConfig->wifi_ssid));
     }
     if (doc.containsKey("wifi_password")) {
-        strncpy(sysConfig->wifi_password, doc["wifi_password"], 63);
+        strlcpy(sysConfig->wifi_password, doc["wifi_password"] | "", sizeof(sysConfig->wifi_password));
+    }
+    if (doc.containsKey("wifi_ssid") || doc.containsKey("wifi_password")) {
+        sysConfig->wifi_configured = strlen(sysConfig->wifi_ssid) > 0;
+    }
+
+    bool mqttChanged = false;
+    if (doc.containsKey("mqtt_enabled")) {
+        mqttChanged = true;
+        sysConfig->mqtt_enabled = doc["mqtt_enabled"];
     }
     if (doc.containsKey("mqtt_server")) {
-        strncpy(sysConfig->mqtt_server, doc["mqtt_server"], 63);
+        mqttChanged = true;
+        strlcpy(sysConfig->mqtt_server, doc["mqtt_server"] | "", sizeof(sysConfig->mqtt_server));
     }
     if (doc.containsKey("mqtt_port")) {
+        mqttChanged = true;
         sysConfig->mqtt_port = doc["mqtt_port"];
     }
     if (doc.containsKey("mqtt_user")) {
-        strncpy(sysConfig->mqtt_user, doc["mqtt_user"], 31);
+        mqttChanged = true;
+        strlcpy(sysConfig->mqtt_user, doc["mqtt_user"] | "", sizeof(sysConfig->mqtt_user));
     }
     if (doc.containsKey("mqtt_password")) {
-        strncpy(sysConfig->mqtt_password, doc["mqtt_password"], 63);
+        mqttChanged = true;
+        strlcpy(sysConfig->mqtt_password, doc["mqtt_password"] | "", sizeof(sysConfig->mqtt_password));
     }
     if (doc.containsKey("mqtt_client_id")) {
-        strncpy(sysConfig->mqtt_client_id, doc["mqtt_client_id"], 31);
-    }
-    if (doc.containsKey("mqtt_enabled")) {
-        sysConfig->mqtt_enabled = doc["mqtt_enabled"];
+        mqttChanged = true;
+        strlcpy(sysConfig->mqtt_client_id, doc["mqtt_client_id"] | "", sizeof(sysConfig->mqtt_client_id));
     }
     if (doc.containsKey("mqtt_discovery")) {
+        mqttChanged = true;
         sysConfig->mqtt_discovery = doc["mqtt_discovery"];
     }
-    if (doc.containsKey("timezone")) {
-        strncpy(sysConfig->timezone, doc["timezone"], 63);
-    }
+
     if (doc.containsKey("ntp_server")) {
-        strncpy(sysConfig->ntp_server, doc["ntp_server"], 63);
+        strlcpy(sysConfig->ntp_server, doc["ntp_server"] | "", sizeof(sysConfig->ntp_server));
     }
-    if (doc.containsKey("utc_offset")) {
-        sysConfig->utc_offset = doc["utc_offset"];
+    if (doc.containsKey("timezone")) {
+        strlcpy(sysConfig->timezone, doc["timezone"] | "", sizeof(sysConfig->timezone));
     }
-    if (doc.containsKey("dst_enabled")) {
-        sysConfig->dst_enabled = doc["dst_enabled"];
+    if (doc.containsKey("device_name")) {
+        strlcpy(sysConfig->device_name, doc["device_name"] | "", sizeof(sysConfig->device_name));
     }
     if (doc.containsKey("default_frequency")) {
         sysConfig->default_frequency = doc["default_frequency"];
-        rfModule.setFrequency(sysConfig->default_frequency);
-    }
-    if (doc.containsKey("default_modulation")) {
-        sysConfig->default_modulation = doc["default_modulation"];
-        rfModule.setModulation(sysConfig->default_modulation);
-    }
-    if (doc.containsKey("device_name")) {
-        strncpy(sysConfig->device_name, doc["device_name"], 31);
-    }
-    if (doc.containsKey("auto_detect_enabled")) {
-        sysConfig->auto_detect_enabled = doc["auto_detect_enabled"];
     }
 
-    // Guardar
     if (storage.saveConfig(sysConfig)) {
-        sendJsonResponse(request, 200, "{\"success\":true}");
-    } else {
-        sendJsonError(request, 500, "Error al guardar configuración");
-    }
-}
-
-void WebServerManager::handleGetDevices(AsyncWebServerRequest* request) {
-    SavedDevice devices[MAX_DEVICES];
-    uint8_t count = 0;
-
-    storage.loadDevices(devices, &count);
-
-    DynamicJsonDocument doc(JSON_BUFFER_SIZE);
-    JsonArray arr = doc.to<JsonArray>();
-
-    for (uint8_t i = 0; i < count; i++) {
-        JsonObject obj = arr.createNestedObject();
-        obj["id"] = devices[i].id;
-        obj["name"] = devices[i].name;
-        obj["type"] = (int)devices[i].type;
-        obj["signalCount"] = devices[i].signalCount;
-        obj["enabled"] = devices[i].enabled;
-        obj["room"] = devices[i].room;
-
-        JsonArray signals = obj.createNestedArray("signals");
-        for (uint8_t j = 0; j < devices[i].signalCount; j++) {
-            JsonObject sig = signals.createNestedObject();
-            sig["index"] = j;
-            sig["name"] = devices[i].signalNames[j];
-            sig["valid"] = devices[i].signals[j].valid;
-            sig["frequency"] = devices[i].signals[j].frequency;
+        // Si cambió la configuración MQTT, reconectar
+        if (mqttChanged) {
+            Serial.println("[Web] Config MQTT cambiada, reconectando...");
+            mqttClient.stop();
+            if (sysConfig->mqtt_enabled && strlen(sysConfig->mqtt_server) > 0) {
+                mqttClient.begin(sysConfig);
+            }
         }
+        sendJsonResponse(200, "{\"success\":true,\"message\":\"Configuracion guardada\"}");
+    } else {
+        sendJsonError(500, "Error al guardar configuracion");
     }
-
-    String response;
-    serializeJson(doc, response);
-    sendJsonResponse(request, 200, response);
 }
 
-void WebServerManager::handleAddDevice(AsyncWebServerRequest* request, uint8_t* data, size_t len) {
-    DynamicJsonDocument doc(1024);
-    DeserializationError error = deserializeJson(doc, (char*)data, len);
+void WebServerManager::handleGetDevices() {
+    handleCORS();
+
+    // Leer archivo JSON directamente para evitar cargar todo en RAM
+    if (!LittleFS.exists(DEVICES_FILE)) {
+        sendJsonResponse(200, "[]");
+        return;
+    }
+
+    File file = LittleFS.open(DEVICES_FILE, "r");
+    if (!file) {
+        sendJsonResponse(200, "[]");
+        return;
+    }
+
+    // Enviar el contenido del archivo directamente
+    String content = file.readString();
+    file.close();
+
+    if (content.length() == 0) {
+        sendJsonResponse(200, "[]");
+        return;
+    }
+
+    sendJsonResponse(200, content);
+}
+
+void WebServerManager::handleAddDevice() {
+    handleCORS();
+
+    if (!server->hasArg("plain")) {
+        sendJsonError(400, "No data received");
+        return;
+    }
+
+    String body = server->arg("plain");
+    StaticJsonDocument<1024> doc;
+    DeserializationError error = deserializeJson(doc, body);
 
     if (error) {
-        sendJsonError(request, 400, "JSON inválido");
+        sendJsonError(400, "Invalid JSON");
         return;
     }
 
     SavedDevice device;
-    memset(&device, 0, sizeof(SavedDevice));
+    memset(&device, 0, sizeof(device));
 
     String uuid = storage.generateUUID();
-    strncpy(device.id, uuid.c_str(), 36);
-    strncpy(device.name, doc["name"] | "Nuevo dispositivo", 63);
-    device.type = (DeviceType)(doc["type"] | DEVICE_UNKNOWN);
-    strncpy(device.room, doc["room"] | "", 31);
+    strlcpy(device.id, uuid.c_str(), sizeof(device.id));
+    strlcpy(device.name, doc["name"] | "Nuevo dispositivo", sizeof(device.name));
+    device.type = (DeviceType)(doc["type"].as<int>());
+    strlcpy(device.room, doc["room"] | "", sizeof(device.room));
     device.enabled = true;
-    device.signalCount = 0;
-    device.createdAt = millis();
-    device.lastUsed = 0;
+
+    if (device.type == DEVICE_CURTAIN_SOMFY) {
+        device.somfy.address = doc["somfy_address"] | 0;
+        device.somfy.rollingCode = doc["somfy_rolling_code"] | 0;
+    }
+
+    if (device.type == DEVICE_CURTAIN_DOOYA_BIDIR) {
+        device.dooyaBidir.deviceId = doc["dooya_device_id"] | 0;
+        device.dooyaBidir.unitCode = doc["dooya_unit_code"] | 1;
+    }
 
     if (storage.addDevice(&device)) {
-        DynamicJsonDocument response(256);
+        StaticJsonDocument<256> response;
         response["success"] = true;
         response["id"] = device.id;
-
+        response["message"] = "Dispositivo agregado";
         String responseStr;
         serializeJson(response, responseStr);
-        sendJsonResponse(request, 200, responseStr);
+        sendJsonResponse(200, responseStr);
     } else {
-        sendJsonError(request, 500, "Error al guardar dispositivo");
+        sendJsonError(500, "Error al agregar dispositivo");
     }
 }
 
-void WebServerManager::handleUpdateDevice(AsyncWebServerRequest* request, uint8_t* data, size_t len) {
-    DynamicJsonDocument doc(1024);
-    DeserializationError error = deserializeJson(doc, (char*)data, len);
+void WebServerManager::handleUpdateDevice() {
+    handleCORS();
 
-    if (error || !doc.containsKey("id")) {
-        sendJsonError(request, 400, "JSON inválido o falta ID");
+    if (!server->hasArg("plain")) {
+        sendJsonError(400, "No data received");
+        return;
+    }
+
+    String body = server->arg("plain");
+    StaticJsonDocument<1024> doc;
+    DeserializationError error = deserializeJson(doc, body);
+
+    if (error) {
+        sendJsonError(400, "Invalid JSON");
+        return;
+    }
+
+    const char* id = doc["id"] | "";
+    if (strlen(id) == 0) {
+        sendJsonError(400, "Device ID required");
         return;
     }
 
     SavedDevice device;
-    if (!storage.getDevice(doc["id"], &device)) {
-        sendJsonError(request, 404, "Dispositivo no encontrado");
+    if (!storage.getDevice(id, &device)) {
+        sendJsonError(404, "Device not found");
         return;
     }
 
     if (doc.containsKey("name")) {
-        strncpy(device.name, doc["name"], 63);
+        strlcpy(device.name, doc["name"], sizeof(device.name));
     }
-    if (doc.containsKey("type")) {
-        device.type = (DeviceType)(int)doc["type"];
-    }
+    if (doc.containsKey("type")) device.type = (DeviceType)(doc["type"].as<int>());
     if (doc.containsKey("room")) {
-        strncpy(device.room, doc["room"], 31);
+        strlcpy(device.room, doc["room"], sizeof(device.room));
     }
-    if (doc.containsKey("enabled")) {
-        device.enabled = doc["enabled"];
-    }
+    if (doc.containsKey("enabled")) device.enabled = doc["enabled"];
 
-    if (storage.updateDevice(doc["id"], &device)) {
-        sendJsonResponse(request, 200, "{\"success\":true}");
+    if (doc.containsKey("somfy_address")) device.somfy.address = doc["somfy_address"];
+    if (doc.containsKey("somfy_rolling_code")) device.somfy.rollingCode = doc["somfy_rolling_code"];
+    if (doc.containsKey("dooya_device_id")) device.dooyaBidir.deviceId = doc["dooya_device_id"];
+    if (doc.containsKey("dooya_unit_code")) device.dooyaBidir.unitCode = doc["dooya_unit_code"];
+
+    if (storage.updateDevice(id, &device)) {
+        sendJsonResponse(200, "{\"success\":true,\"message\":\"Dispositivo actualizado\"}");
     } else {
-        sendJsonError(request, 500, "Error al actualizar dispositivo");
+        sendJsonError(500, "Error al actualizar dispositivo");
     }
 }
 
-void WebServerManager::handleDeleteDevice(AsyncWebServerRequest* request) {
-    if (!request->hasParam("id")) {
-        sendJsonError(request, 400, "Falta parámetro 'id'");
+void WebServerManager::handleDeleteDevice() {
+    handleCORS();
+
+    String id = server->arg("id");
+    if (id.length() == 0) {
+        sendJsonError(400, "Device ID required");
         return;
     }
-
-    String id = request->getParam("id")->value();
 
     if (storage.deleteDevice(id.c_str())) {
-        sendJsonResponse(request, 200, "{\"success\":true}");
+        sendJsonResponse(200, "{\"success\":true,\"message\":\"Dispositivo eliminado\"}");
     } else {
-        sendJsonError(request, 404, "Dispositivo no encontrado");
+        sendJsonError(500, "Error al eliminar dispositivo");
     }
 }
 
-void WebServerManager::handleTransmitSignal(AsyncWebServerRequest* request) {
-    if (!request->hasParam("id") || !request->hasParam("signal")) {
-        sendJsonError(request, 400, "Faltan parámetros 'id' y/o 'signal'");
+void WebServerManager::handleTransmitSignal() {
+    handleCORS();
+
+    String deviceId = server->arg("id");
+    int signalIndex = server->arg("signal").toInt();
+
+    Serial.printf("[Web] Transmit request: device=%s, signal=%d\n", deviceId.c_str(), signalIndex);
+
+    if (deviceId.length() == 0) {
+        sendJsonError(400, "Device ID required");
         return;
     }
-
-    String deviceId = request->getParam("id")->value();
-    int signalIndex = request->getParam("signal")->value().toInt();
 
     SavedDevice device;
     if (!storage.getDevice(deviceId.c_str(), &device)) {
-        sendJsonError(request, 404, "Dispositivo no encontrado");
+        Serial.printf("[Web] Device not found: %s\n", deviceId.c_str());
+        sendJsonError(404, "Device not found");
         return;
     }
 
-    if (signalIndex < 0 || signalIndex >= device.signalCount) {
-        sendJsonError(request, 400, "Índice de señal inválido");
+    Serial.printf("[Web] Device found: %s, type=%d, signalCount=%d\n",
+                  device.name, device.type, device.signalCount);
+
+    // Somfy RTS
+    if (device.type == DEVICE_CURTAIN_SOMFY) {
+        uint8_t cmd = SOMFY_CMD_MY;
+        if (signalIndex == 0) cmd = SOMFY_CMD_UP;
+        else if (signalIndex == 1) cmd = SOMFY_CMD_DOWN;
+        else if (signalIndex == 2) cmd = SOMFY_CMD_MY;
+        else if (signalIndex == 3) cmd = SOMFY_CMD_PROG;
+
+        somfyRTS.setRemote(&device.somfy);
+        somfyRTS.sendCommand(cmd);
+        device.somfy.rollingCode++;
+        storage.updateSomfyRollingCode(deviceId.c_str(), device.somfy.rollingCode);
+
+        sendJsonResponse(200, "{\"success\":true,\"message\":\"Comando Somfy enviado\"}");
         return;
     }
 
-    if (!device.signals[signalIndex].valid) {
-        sendJsonError(request, 400, "Señal no válida");
+    // Dooya Bidir
+    if (device.type == DEVICE_CURTAIN_DOOYA_BIDIR) {
+        uint8_t cmd = DOOYA_BIDIR_CMD_STOP;
+        if (signalIndex == 0) cmd = DOOYA_BIDIR_CMD_UP;
+        else if (signalIndex == 1) cmd = DOOYA_BIDIR_CMD_DOWN;
+        else if (signalIndex == 2) cmd = DOOYA_BIDIR_CMD_STOP;
+        else if (signalIndex == 3) cmd = DOOYA_BIDIR_CMD_PROG;
+
+        dooyaBidir.setRemote(&device.dooyaBidir);
+        dooyaBidir.sendCommand(cmd);
+
+        sendJsonResponse(200, "{\"success\":true,\"message\":\"Comando Dooya enviado\"}");
         return;
     }
 
-    // Transmitir señal
-    rfModule.setFrequency(device.signals[signalIndex].frequency);
-    rfModule.setModulation(device.signals[signalIndex].modulation);
+    // Generic signals
+    if (signalIndex < 0 || signalIndex >= 4) {
+        sendJsonError(400, "Invalid signal index");
+        return;
+    }
 
-    if (rfModule.transmitSignal(&device.signals[signalIndex])) {
-        // Actualizar último uso
-        device.lastUsed = millis();
-        storage.updateDevice(deviceId.c_str(), &device);
+    if (device.signals[signalIndex].length == 0) {
+        sendJsonError(404, "Signal not found");
+        return;
+    }
 
-        sendJsonResponse(request, 200, "{\"success\":true}");
+    // Use signal's repeatCount, default to RF_REPEAT_TRANSMIT if not set
+    int repeats = device.signals[signalIndex].repeatCount > 0 ?
+                  device.signals[signalIndex].repeatCount : RF_REPEAT_TRANSMIT;
 
-        // Notificar por WebSocket
-        broadcastStatus();
+    if (rfModule.transmitRaw(device.signals[signalIndex].data, device.signals[signalIndex].length, repeats)) {
+        if (onSignalTransmit) {
+            onSignalTransmit(deviceId.c_str(), signalIndex);
+        }
+        sendJsonResponse(200, "{\"success\":true,\"message\":\"Senal transmitida\"}");
     } else {
-        sendJsonError(request, 500, "Error al transmitir señal");
+        sendJsonError(500, "Error al transmitir senal");
     }
 }
 
-void WebServerManager::handleStartCapture(AsyncWebServerRequest* request) {
-    float frequency = sysConfig->default_frequency;
-    int modulation = sysConfig->default_modulation;
-    bool autoDetect = false;
+void WebServerManager::handleStartCapture() {
+    handleCORS();
 
-    if (request->hasParam("frequency")) {
-        frequency = request->getParam("frequency")->value().toFloat();
-    }
-    if (request->hasParam("modulation")) {
-        modulation = request->getParam("modulation")->value().toInt();
-    }
-    if (request->hasParam("auto")) {
-        autoDetect = request->getParam("auto")->value() == "true";
+    float frequency = server->arg("frequency").toFloat();
+    if (frequency <= 0) {
+        frequency = sysConfig->default_frequency;
     }
 
     rfModule.setFrequency(frequency);
-    rfModule.setModulation(modulation);
-
-    memset(&tempCapturedSignal, 0, sizeof(RFSignal));
-    captureInProgress = true;
-
-    // Iniciar captura en background
-    if (autoDetect) {
-        // Escanear frecuencias primero
-        float detected = rfModule.scanForSignal((float*)RF_FREQUENCIES, RF_FREQUENCIES_COUNT, 5000);
-        if (detected > 0) {
-            rfModule.setFrequency(detected);
-        }
-    }
 
     if (rfModule.startCapture()) {
-        DynamicJsonDocument doc(256);
+        captureInProgress = true;
+        StaticJsonDocument<128> doc;
         doc["success"] = true;
-        doc["frequency"] = rfModule.getFrequency();
-        doc["modulation"] = rfModule.getModulation();
-
+        doc["frequency"] = frequency;
+        doc["message"] = "Captura iniciada";
         String response;
         serializeJson(doc, response);
-        sendJsonResponse(request, 200, response);
+        sendJsonResponse(200, response);
     } else {
-        captureInProgress = false;
-        sendJsonError(request, 500, "Error al iniciar captura");
+        sendJsonError(500, "Error al iniciar captura");
     }
 }
 
-void WebServerManager::handleStopCapture(AsyncWebServerRequest* request) {
+void WebServerManager::handleStopCapture() {
+    handleCORS();
+
     rfModule.stopCapture();
     captureInProgress = false;
-    sendJsonResponse(request, 200, "{\"success\":true}");
+    sendJsonResponse(200, "{\"success\":true,\"message\":\"Captura detenida\"}");
 }
 
-void WebServerManager::handleGetCapture(AsyncWebServerRequest* request) {
-    unsigned long timeout = 10000;
-    if (request->hasParam("timeout")) {
-        timeout = request->getParam("timeout")->value().toInt();
-    }
+void WebServerManager::handleGetCapture() {
+    handleCORS();
 
-    // Si hay captura en progreso, intentar obtener resultado
-    if (captureInProgress || rfModule.isCapturing()) {
-        if (rfModule.captureSignal(&tempCapturedSignal, timeout)) {
-            captureInProgress = false;
+    unsigned long timeout = server->arg("timeout").toInt();
+    if (timeout <= 0) timeout = 10000;
 
-            DynamicJsonDocument doc(2048);
+    unsigned long startTime = millis();
+    RFSignal signal;
+
+    while (millis() - startTime < timeout) {
+        if (rfModule.captureSignal(&signal, timeout - (millis() - startTime))) {
+            DynamicJsonDocument doc(2048);  // Use heap for large signal data
             doc["success"] = true;
-            doc["valid"] = tempCapturedSignal.valid;
-            doc["length"] = tempCapturedSignal.length;
-            doc["frequency"] = tempCapturedSignal.frequency;
-            doc["modulation"] = tempCapturedSignal.modulation;
+            doc["valid"] = true;
+            doc["frequency"] = round(signal.frequency * 100) / 100.0;  // Round to 2 decimals
+            doc["length"] = signal.length;
+            doc["modulation"] = signal.modulation;
+            doc["repeatCount"] = RF_REPEAT_TRANSMIT;  // Default repeat count
 
-            // Datos en hex
-            String dataHex = "";
-            for (uint16_t i = 0; i < tempCapturedSignal.length; i++) {
-                char hex[3];
-                sprintf(hex, "%02X", tempCapturedSignal.data[i]);
-                dataHex += hex;
+            // Incluir todos los datos capturados
+            String hexData = "";
+            hexData.reserve(signal.length * 2 + 1);
+            for (uint16_t i = 0; i < signal.length; i++) {
+                if (signal.data[i] < 16) hexData += "0";
+                hexData += String(signal.data[i], HEX);
             }
-            doc["data"] = dataHex;
-
-            // Análisis
-            doc["analysis"] = rfModule.analyzeSignal(&tempCapturedSignal);
-            doc["recommendations"] = rfModule.getRecommendedSettings(&tempCapturedSignal);
+            doc["data"] = hexData;
 
             String response;
             serializeJson(doc, response);
-            sendJsonResponse(request, 200, response);
-
-            // Notificar por WebSocket
-            broadcastCapturedSignal(&tempCapturedSignal);
+            sendJsonResponse(200, response);
             return;
         }
+        // Si captureSignal retorna false, salir del loop
+        break;
     }
 
-    DynamicJsonDocument doc(256);
+    StaticJsonDocument<128> doc;
     doc["success"] = false;
-    doc["capturing"] = rfModule.isCapturing();
-    doc["message"] = "No hay señal capturada";
-
+    doc["valid"] = false;
+    doc["message"] = "No signal detected";
     String response;
     serializeJson(doc, response);
-    sendJsonResponse(request, 200, response);
+    sendJsonResponse(408, response);
 }
 
-void WebServerManager::handleSaveSignal(AsyncWebServerRequest* request, uint8_t* data, size_t len) {
-    DynamicJsonDocument doc(2048);
-    DeserializationError error = deserializeJson(doc, (char*)data, len);
+void WebServerManager::handleSaveSignal() {
+    handleCORS();
+
+    if (!server->hasArg("plain")) {
+        sendJsonError(400, "No data received");
+        return;
+    }
+
+    String body = server->arg("plain");
+    DynamicJsonDocument doc(2048);  // Use heap instead of stack
+    DeserializationError error = deserializeJson(doc, body);
 
     if (error) {
-        sendJsonError(request, 400, "JSON inválido");
+        Serial.printf("[Web] Save signal JSON error: %s\n", error.c_str());
+        sendJsonError(400, "Invalid JSON");
         return;
     }
 
-    if (!doc.containsKey("deviceId") || !doc.containsKey("signalIndex") || !doc.containsKey("signalName")) {
-        sendJsonError(request, 400, "Faltan campos requeridos");
+    const char* deviceId = doc["deviceId"] | "";
+    int signalIndexInt = doc["signalIndex"] | -1;  // Use int to detect missing value
+    const char* signalName = doc["signalName"] | "Signal";
+
+    Serial.printf("[Web] Save signal: deviceId=%s, index=%d, name=%s\n",
+                  deviceId, signalIndexInt, signalName);
+
+    if (strlen(deviceId) == 0) {
+        sendJsonError(400, "Device ID required");
         return;
     }
 
-    String deviceId = doc["deviceId"];
-    int signalIndex = doc["signalIndex"];
-    String signalName = doc["signalName"];
-
-    // Usar señal capturada temporal o datos del request
-    RFSignal* signalToSave = &tempCapturedSignal;
-
-    if (doc.containsKey("data")) {
-        // Usar datos del request
-        String dataHex = doc["data"];
-        signalToSave->length = min((int)(dataHex.length() / 2), RF_MAX_SIGNAL_LENGTH);
-
-        for (uint16_t i = 0; i < signalToSave->length; i++) {
-            String byteStr = dataHex.substring(i * 2, i * 2 + 2);
-            signalToSave->data[i] = (uint8_t)strtol(byteStr.c_str(), NULL, 16);
-        }
-
-        signalToSave->frequency = doc["frequency"] | sysConfig->default_frequency;
-        signalToSave->modulation = doc["modulation"] | sysConfig->default_modulation;
-        signalToSave->valid = true;
-    }
-
-    if (!signalToSave->valid) {
-        sendJsonError(request, 400, "No hay señal válida para guardar");
+    if (signalIndexInt < 0 || signalIndexInt > 3) {
+        Serial.printf("[Web] Invalid signal index: %d\n", signalIndexInt);
+        sendJsonError(400, "Invalid signal index");
         return;
     }
 
-    if (storage.saveSignalToDevice(deviceId.c_str(), signalIndex, signalToSave, signalName.c_str())) {
-        sendJsonResponse(request, 200, "{\"success\":true}");
+    uint8_t signalIndex = (uint8_t)signalIndexInt;
+
+    RFSignal signal;
+    memset(&signal, 0, sizeof(signal));
+
+    signal.valid = true;  // Mark signal as valid!
+    signal.frequency = doc["frequency"] | 433.92f;
+    signal.modulation = doc["modulation"] | 2;
+    signal.repeatCount = doc["repeatCount"] | RF_REPEAT_TRANSMIT;
+
+    // Clamp repeat count between 1-20
+    if (signal.repeatCount < 1) signal.repeatCount = 1;
+    if (signal.repeatCount > 20) signal.repeatCount = 20;
+
+    String hexData = doc["data"] | "";
+    signal.length = hexData.length() / 2;
+    if (signal.length > RF_MAX_SIGNAL_LENGTH) {
+        signal.length = RF_MAX_SIGNAL_LENGTH;
+    }
+
+    for (uint16_t i = 0; i < signal.length; i++) {
+        String byteStr = hexData.substring(i * 2, i * 2 + 2);
+        signal.data[i] = strtol(byteStr.c_str(), NULL, 16);
+    }
+
+    Serial.printf("[Web] Saving signal: valid=%d, freq=%.2f, mod=%d, len=%d, repeat=%d\n",
+                  signal.valid, signal.frequency, signal.modulation, signal.length, signal.repeatCount);
+
+    if (storage.saveSignalToDevice(deviceId, signalIndex, &signal, signalName)) {
+        sendJsonResponse(200, "{\"success\":true,\"message\":\"Senal guardada\"}");
     } else {
-        sendJsonError(request, 500, "Error al guardar señal");
+        sendJsonError(500, "Error al guardar senal");
     }
 }
 
-void WebServerManager::handleSetFrequency(AsyncWebServerRequest* request) {
-    if (!request->hasParam("freq")) {
-        sendJsonError(request, 400, "Falta parámetro 'freq'");
+void WebServerManager::handleDeleteSignal() {
+    handleCORS();
+
+    if (!server->hasArg("plain")) {
+        sendJsonError(400, "No data received");
         return;
     }
 
-    float freq = request->getParam("freq")->value().toFloat();
-    rfModule.setFrequency(freq);
+    String body = server->arg("plain");
+    StaticJsonDocument<256> doc;
+    DeserializationError error = deserializeJson(doc, body);
 
-    DynamicJsonDocument doc(128);
-    doc["success"] = true;
-    doc["frequency"] = rfModule.getFrequency();
-
-    String response;
-    serializeJson(doc, response);
-    sendJsonResponse(request, 200, response);
-}
-
-void WebServerManager::handleScanFrequency(AsyncWebServerRequest* request) {
-    unsigned long timeout = 5000;
-    if (request->hasParam("timeout")) {
-        timeout = request->getParam("timeout")->value().toInt();
+    if (error) {
+        sendJsonError(400, "Invalid JSON");
+        return;
     }
 
-    float detected = rfModule.scanForSignal((float*)RF_FREQUENCIES, RF_FREQUENCIES_COUNT, timeout);
+    const char* deviceId = doc["deviceId"] | "";
+    int signalIndex = doc["signalIndex"] | -1;
 
-    DynamicJsonDocument doc(256);
-    doc["success"] = detected > 0;
-    doc["detected_frequency"] = detected;
-    doc["rssi"] = rfModule.getRSSI();
+    Serial.printf("[Web] Delete signal: device=%s, index=%d\n", deviceId, signalIndex);
+
+    if (strlen(deviceId) == 0 || signalIndex < 0 || signalIndex > 3) {
+        sendJsonError(400, "Invalid device ID or signal index");
+        return;
+    }
+
+    if (storage.deleteSignalFromDevice(deviceId, signalIndex)) {
+        sendJsonResponse(200, "{\"success\":true,\"message\":\"Senal eliminada\"}");
+    } else {
+        sendJsonError(500, "Error al eliminar senal");
+    }
+}
+
+void WebServerManager::handleTestSignal() {
+    handleCORS();
+    Serial.println("[Web] handleTestSignal called");
+
+    if (!server->hasArg("plain")) {
+        Serial.println("[Web] No data received in test signal");
+        sendJsonError(400, "No data received");
+        return;
+    }
+
+    String body = server->arg("plain");
+    Serial.printf("[Web] Test signal body length: %d\n", body.length());
+
+    DynamicJsonDocument doc(2048);  // Use heap instead of stack
+    DeserializationError error = deserializeJson(doc, body);
+
+    if (error) {
+        Serial.printf("[Web] Test signal JSON error: %s\n", error.c_str());
+        sendJsonError(400, "Invalid JSON");
+        return;
+    }
+
+    String hexData = doc["data"] | "";
+    float frequency = doc["frequency"] | 433.92f;
+    int modulation = doc["modulation"] | 2;
+    int repeatCount = doc["repeatCount"] | 3;  // Default 3 for test
+
+    // Clamp repeat count
+    if (repeatCount < 1) repeatCount = 1;
+    if (repeatCount > 20) repeatCount = 20;
+
+    Serial.printf("[Web] Test signal: freq=%.2f, mod=%d, data_len=%d, repeat=%d\n", frequency, modulation, hexData.length(), repeatCount);
+
+    if (hexData.length() < 4) {
+        sendJsonError(400, "No signal data");
+        return;
+    }
+
+    // Convert hex to bytes
+    uint16_t length = hexData.length() / 2;
+    if (length > RF_MAX_SIGNAL_LENGTH) {
+        length = RF_MAX_SIGNAL_LENGTH;
+    }
+
+    uint8_t* signalData = new uint8_t[length];
+    for (uint16_t i = 0; i < length; i++) {
+        String byteStr = hexData.substring(i * 2, i * 2 + 2);
+        signalData[i] = strtol(byteStr.c_str(), NULL, 16);
+    }
+
+    // Set frequency and modulation
+    Serial.printf("[Web] Setting freq=%.2f, mod=%d\n", frequency, modulation);
+    rfModule.setFrequency(frequency);
+    rfModule.setModulation(modulation);
+
+    // Transmit
+    Serial.printf("[Web] Transmitting %d bytes, %d times...\n", length, repeatCount);
+    bool success = rfModule.transmitRaw(signalData, length, repeatCount);
+    delete[] signalData;
+
+    Serial.printf("[Web] Transmit result: %s\n", success ? "OK" : "FAILED");
+
+    if (success) {
+        sendJsonResponse(200, "{\"success\":true,\"message\":\"Senal de prueba transmitida\"}");
+    } else {
+        sendJsonError(500, "Error al transmitir");
+    }
+}
+
+void WebServerManager::handleUpdateSignalRepeat() {
+    handleCORS();
+
+    if (!server->hasArg("plain")) {
+        sendJsonError(400, "No data received");
+        return;
+    }
+
+    String body = server->arg("plain");
+    StaticJsonDocument<256> doc;
+    DeserializationError error = deserializeJson(doc, body);
+
+    if (error) {
+        sendJsonError(400, "Invalid JSON");
+        return;
+    }
+
+    const char* deviceId = doc["deviceId"] | "";
+    int signalIndex = doc["signalIndex"] | -1;
+    int repeatCount = doc["repeatCount"] | 5;
+
+    if (strlen(deviceId) == 0 || signalIndex < 0 || signalIndex > 3) {
+        sendJsonError(400, "Invalid device ID or signal index");
+        return;
+    }
+
+    // Clamp repeat count
+    if (repeatCount < 1) repeatCount = 1;
+    if (repeatCount > 20) repeatCount = 20;
+
+    // Update repeat count in storage
+    if (storage.updateSignalRepeatCount(deviceId, signalIndex, repeatCount)) {
+        Serial.printf("[Web] Signal repeat updated: device=%s, signal=%d, repeat=%d\n",
+                      deviceId, signalIndex, repeatCount);
+        sendJsonResponse(200, "{\"success\":true}");
+    } else {
+        sendJsonError(500, "Error updating repeat count");
+    }
+}
+
+void WebServerManager::handleSetFrequency() {
+    handleCORS();
+
+    float frequency = server->arg("freq").toFloat();
+    if (frequency <= 0) {
+        sendJsonError(400, "Invalid frequency");
+        return;
+    }
+
+    rfModule.setFrequency(frequency);
+
+    StaticJsonDocument<128> doc;
+    doc["success"] = true;
+    doc["frequency"] = frequency;
+    String response;
+    serializeJson(doc, response);
+    sendJsonResponse(200, response);
+}
+
+void WebServerManager::handleScanFrequency() {
+    handleCORS();
+
+    float commonFreqs[] = {433.92, 315.0, 868.0, 433.42};
+    float detectedFreq = rfModule.scanForSignal(commonFreqs, 4);
+
+    StaticJsonDocument<128> doc;
+    doc["success"] = detectedFreq > 0;
+    doc["frequency"] = detectedFreq;
+    doc["message"] = detectedFreq > 0 ? "Frecuencia detectada" : "No se detecto senal";
 
     String response;
     serializeJson(doc, response);
-    sendJsonResponse(request, 200, response);
+    sendJsonResponse(200, response);
 }
 
-void WebServerManager::handleBackup(AsyncWebServerRequest* request) {
+void WebServerManager::handleBackup() {
+    handleCORS();
+
     String backup = storage.createBackup();
-
-    AsyncWebServerResponse* response = request->beginResponse(200, "application/json", backup);
-    response->addHeader("Content-Disposition", "attachment; filename=\"rf_controller_backup.json\"");
-    request->send(response);
+    server->sendHeader("Content-Disposition", "attachment; filename=rf_controller_backup.json");
+    server->send(200, "application/json", backup);
 }
 
-void WebServerManager::handleRestore(AsyncWebServerRequest* request, uint8_t* data, size_t len) {
-    String backupJson = String((char*)data).substring(0, len);
+void WebServerManager::handleRestore() {
+    handleCORS();
 
-    if (storage.restoreBackup(backupJson)) {
-        // Recargar configuración
-        storage.loadConfig(sysConfig);
-        sendJsonResponse(request, 200, "{\"success\":true,\"message\":\"Backup restaurado. Reiniciando...\"}");
+    if (!server->hasArg("plain")) {
+        sendJsonError(400, "No data received");
+        return;
+    }
 
-        // Reiniciar después de un delay
+    String body = server->arg("plain");
+
+    if (storage.restoreBackup(body)) {
+        sendJsonResponse(200, "{\"success\":true,\"message\":\"Backup restaurado. Reiniciando...\"}");
         delay(1000);
         ESP.restart();
     } else {
-        sendJsonError(request, 400, "Error al restaurar backup");
+        sendJsonError(500, "Error al restaurar backup");
     }
 }
 
-void WebServerManager::handleWiFiScan(AsyncWebServerRequest* request) {
-    int n = WiFi.scanNetworks();
+void WebServerManager::handleWiFiScan() {
+    handleCORS();
+
+    Serial.println("[WiFi] Iniciando escaneo de redes...");
+
+    // Limpiar escaneos previos
+    WiFi.scanDelete();
+
+    // Desconectar STA si estaba conectado (para mejor escaneo)
+    WiFi.disconnect(false);
+    delay(100);
+
+    // Asegurar modo AP+STA
+    WiFi.mode(WIFI_AP_STA);
+    delay(100);
+
+    // Escaneo SINCRONO (bloquea pero es más confiable)
+    Serial.println("[WiFi] Escaneando...");
+    int n = WiFi.scanNetworks(false, false, false, 300);  // sync, no hidden, no passive, 300ms por canal
+
+    Serial.printf("[WiFi] Escaneo completado: %d redes\n", n);
 
     DynamicJsonDocument doc(2048);
     JsonArray networks = doc.createNestedArray("networks");
 
-    for (int i = 0; i < n && i < 20; i++) {
-        JsonObject net = networks.createNestedObject();
-        net["ssid"] = WiFi.SSID(i);
-        net["rssi"] = WiFi.RSSI(i);
-        net["encrypted"] = WiFi.encryptionType(i) != WIFI_AUTH_OPEN;
-        net["channel"] = WiFi.channel(i);
+    if (n > 0) {
+        for (int i = 0; i < n; i++) {
+            String ssid = WiFi.SSID(i);
+            if (ssid.length() > 0) {
+                JsonObject network = networks.createNestedObject();
+                network["ssid"] = ssid;
+                network["rssi"] = WiFi.RSSI(i);
+                network["encrypted"] = WiFi.encryptionType(i) != WIFI_AUTH_OPEN;
+                Serial.printf("[WiFi]   - %s (%d dBm)\n", ssid.c_str(), WiFi.RSSI(i));
+            }
+        }
+    } else if (n == 0) {
+        Serial.println("[WiFi] No se encontraron redes");
+    } else {
+        Serial.printf("[WiFi] Error en escaneo: %d\n", n);
     }
 
     WiFi.scanDelete();
 
     String response;
     serializeJson(doc, response);
-    sendJsonResponse(request, 200, response);
+    sendJsonResponse(200, response);
 }
 
-void WebServerManager::handleWiFiConnect(AsyncWebServerRequest* request, uint8_t* data, size_t len) {
-    DynamicJsonDocument doc(512);
-    DeserializationError error = deserializeJson(doc, (char*)data, len);
+void WebServerManager::handleWiFiConnect() {
+    handleCORS();
 
-    if (error || !doc.containsKey("ssid")) {
-        sendJsonError(request, 400, "JSON inválido o falta SSID");
+    if (!server->hasArg("plain")) {
+        sendJsonError(400, "No data received");
         return;
     }
 
-    String ssid = doc["ssid"];
-    String password = doc["password"] | "";
+    String body = server->arg("plain");
+    StaticJsonDocument<256> doc;
+    DeserializationError error = deserializeJson(doc, body);
 
-    // Guardar credenciales
-    strncpy(sysConfig->wifi_ssid, ssid.c_str(), 63);
-    strncpy(sysConfig->wifi_password, password.c_str(), 63);
+    if (error) {
+        sendJsonError(400, "Invalid JSON");
+        return;
+    }
+
+    const char* ssid = doc["ssid"] | "";
+    const char* password = doc["password"] | "";
+
+    if (strlen(ssid) == 0) {
+        sendJsonError(400, "SSID required");
+        return;
+    }
+
+    strlcpy(sysConfig->wifi_ssid, ssid, sizeof(sysConfig->wifi_ssid));
+    strlcpy(sysConfig->wifi_password, password, sizeof(sysConfig->wifi_password));
     sysConfig->wifi_configured = true;
     storage.saveConfig(sysConfig);
 
-    // Intentar conectar
-    sendJsonResponse(request, 200, "{\"success\":true,\"message\":\"Conectando...\"}");
+    sendJsonResponse(200, "{\"success\":true,\"message\":\"Conectando a WiFi... Reiniciando...\"}");
 
-    delay(500);
-    connectWiFi(ssid.c_str(), password.c_str());
-}
-
-void WebServerManager::handleReboot(AsyncWebServerRequest* request) {
-    sendJsonResponse(request, 200, "{\"success\":true,\"message\":\"Reiniciando...\"}");
     delay(1000);
     ESP.restart();
 }
 
-void WebServerManager::handleFactoryReset(AsyncWebServerRequest* request) {
-    sendJsonResponse(request, 200, "{\"success\":true,\"message\":\"Restaurando valores de fábrica...\"}");
+void WebServerManager::handleMqttRediscover() {
+    handleCORS();
 
-    delay(500);
-    storage.format();
-    delay(500);
+    if (!mqttClient.isConnected()) {
+        sendJsonError(400, "MQTT no conectado");
+        return;
+    }
+
+    mqttClient.publishDiscovery();
+    sendJsonResponse(200, "{\"success\":true,\"message\":\"Discovery publicado\"}");
+}
+
+void WebServerManager::handleReboot() {
+    handleCORS();
+    sendJsonResponse(200, "{\"success\":true,\"message\":\"Reiniciando...\"}");
+    delay(1000);
     ESP.restart();
 }
 
-void WebServerManager::onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
-                                  AwsEventType type, void* arg, uint8_t* data, size_t len) {
-    switch (type) {
-        case WS_EVT_CONNECT:
-            Serial.printf("[WS] Cliente conectado: %u\n", client->id());
-            broadcastStatus();
-            break;
+void WebServerManager::handleFactoryReset() {
+    handleCORS();
 
-        case WS_EVT_DISCONNECT:
-            Serial.printf("[WS] Cliente desconectado: %u\n", client->id());
-            break;
-
-        case WS_EVT_DATA: {
-            // Manejar comandos por WebSocket
-            DynamicJsonDocument doc(512);
-            DeserializationError error = deserializeJson(doc, (char*)data, len);
-
-            if (!error && doc.containsKey("cmd")) {
-                String cmd = doc["cmd"];
-
-                if (cmd == "status") {
-                    broadcastStatus();
-                } else if (cmd == "transmit") {
-                    // Transmitir señal
-                    String deviceId = doc["deviceId"];
-                    int signalIndex = doc["signalIndex"];
-
-                    SavedDevice device;
-                    if (storage.getDevice(deviceId.c_str(), &device) &&
-                        signalIndex >= 0 && signalIndex < device.signalCount &&
-                        device.signals[signalIndex].valid) {
-
-                        rfModule.setFrequency(device.signals[signalIndex].frequency);
-                        rfModule.transmitSignal(&device.signals[signalIndex]);
-                        broadcastStatus();
-                    }
-                }
-            }
-            break;
-        }
-
-        default:
-            break;
-    }
-}
-
-void WebServerManager::broadcastStatus() {
-    if (ws.count() == 0) return;
-
-    DynamicJsonDocument doc(512);
-    doc["type"] = "status";
-    doc["wifi_connected"] = isConnected();
-    doc["rf_connected"] = rfModule.isConnected();
-    doc["capturing"] = rfModule.isCapturing();
-    doc["frequency"] = rfModule.getFrequency();
-    doc["rssi"] = rfModule.getRSSI();
-
-    String message;
-    serializeJson(doc, message);
-    ws.textAll(message);
-}
-
-void WebServerManager::broadcastCapturedSignal(const RFSignal* signal) {
-    if (ws.count() == 0) return;
-
-    DynamicJsonDocument doc(2048);
-    doc["type"] = "signal_captured";
-    doc["valid"] = signal->valid;
-    doc["length"] = signal->length;
-    doc["frequency"] = signal->frequency;
-
-    String message;
-    serializeJson(doc, message);
-    ws.textAll(message);
-}
-
-void WebServerManager::sendJsonResponse(AsyncWebServerRequest* request, int code, const String& json) {
-    AsyncWebServerResponse* response = request->beginResponse(code, "application/json", json);
-    response->addHeader("Access-Control-Allow-Origin", "*");
-    request->send(response);
-}
-
-void WebServerManager::sendJsonError(AsyncWebServerRequest* request, int code, const String& message) {
-    DynamicJsonDocument doc(256);
-    doc["success"] = false;
-    doc["error"] = message;
-
-    String response;
-    serializeJson(doc, response);
-    sendJsonResponse(request, code, response);
+    storage.format();
+    sendJsonResponse(200, "{\"success\":true,\"message\":\"Restauracion de fabrica. Reiniciando...\"}");
+    delay(1000);
+    ESP.restart();
 }
 
 String WebServerManager::getContentType(const String& filename) {
@@ -928,5 +1108,17 @@ String WebServerManager::getContentType(const String& filename) {
     if (filename.endsWith(".json")) return "application/json";
     if (filename.endsWith(".png")) return "image/png";
     if (filename.endsWith(".ico")) return "image/x-icon";
+    if (filename.endsWith(".svg")) return "image/svg+xml";
     return "text/plain";
+}
+
+void WebServerManager::sendJsonResponse(int code, const String& json) {
+    handleCORS();
+    server->send(code, "application/json", json);
+}
+
+void WebServerManager::sendJsonError(int code, const String& message) {
+    handleCORS();
+    String json = "{\"success\":false,\"error\":\"" + message + "\"}";
+    server->send(code, "application/json", json);
 }

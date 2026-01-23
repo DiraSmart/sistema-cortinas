@@ -1,24 +1,6 @@
 /*
  * ==============================================
- * RF Controller - ESP32 + CC1101
- * ==============================================
- *
- * Sistema de control RF para dispositivos genéricos
- * - Copy/Replay de señales RF
- * - Interfaz web de configuración
- * - Integración MQTT con Home Assistant
- * - Soporte para cortinas, interruptores, portones, etc.
- *
- * Conexiones ESP32 -> CC1101:
- * - GDO0 -> GPIO 13
- * - GDO2 -> GPIO 12
- * - CSN  -> GPIO 5
- * - SCK  -> GPIO 18
- * - MISO -> GPIO 19
- * - MOSI -> GPIO 23
- * - VCC  -> 3.3V
- * - GND  -> GND
- *
+ * RF Controller - ESP32 + CC1101 - FINAL
  * ==============================================
  */
 
@@ -31,7 +13,7 @@
 #include "CC1101_RF.h"
 #include "SomfyRTS.h"
 #include "DooyaBidir.h"
-#include "WebServer.h"
+#include "WebServerManager.h"
 #include "MQTTClient.h"
 #include "TimeManager.h"
 
@@ -48,14 +30,13 @@ void printStatus();
 void handleRFCommand(const char* deviceId, const char* command);
 
 void setup() {
-    // Inicializar Serial
     Serial.begin(115200);
-    delay(1000);
+    delay(500);
 
     Serial.println();
     Serial.println("==============================================");
     Serial.println("   RF Controller - ESP32 + CC1101");
-    Serial.println("   Version 1.0.0");
+    Serial.printf("   Version %s\n", FIRMWARE_VERSION);
     Serial.println("==============================================");
     Serial.println();
 
@@ -63,115 +44,138 @@ void setup() {
 }
 
 void loop() {
-    if (!systemReady) return;
+    if (!systemReady) {
+        delay(100);
+        return;
+    }
 
-    // Loop del servidor web
     webServer.loop();
 
-    // Loop del cliente MQTT
-    mqttClient.loop();
+    if (systemConfig.mqtt_enabled && WiFi.status() == WL_CONNECTED) {
+        mqttClient.loop();
+    }
 
-    // Imprimir estado cada 30 segundos
-    if (millis() - lastStatusPrint > 30000) {
-        lastStatusPrint = millis();
+    if (millis() - lastStatusPrint > 60000) {
         printStatus();
+        lastStatusPrint = millis();
     }
 }
 
 void initSystem() {
-    Serial.println("[System] Iniciando sistema...");
+    // 1. WiFi AP+STA (modo mixto para permitir escaneo de redes)
+    Serial.println("[1/6] Configurando WiFi...");
+    Serial.flush();
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.softAP(AP_SSID, AP_PASSWORD);
+    Serial.println("[OK] WiFi AP iniciado (modo mixto)");
+    Serial.flush();
 
-    // 1. Inicializar almacenamiento
-    Serial.println("\n[1/7] Inicializando almacenamiento...");
+    // 2. Storage
+    Serial.println("[2/6] Inicializando Storage...");
+    Serial.flush();
     if (!storage.begin()) {
-        Serial.println("[ERROR] Fallo al inicializar almacenamiento!");
+        Serial.println("[ERROR] Storage falló!");
         return;
     }
+    Serial.println("[OK] Storage inicializado");
+    Serial.flush();
 
-    // 2. Cargar configuración
-    Serial.println("\n[2/7] Cargando configuración...");
-    if (!storage.loadConfig(&systemConfig)) {
-        Serial.println("[WARNING] Usando configuración por defecto");
-        storage.setDefaultConfig(&systemConfig);
+    // Cargar configuración
+    storage.setDefaultConfig(&systemConfig);
+    storage.loadConfig(&systemConfig);
+
+    // Intentar WiFi cliente si está configurado (manteniendo AP activo)
+    if (systemConfig.wifi_configured && strlen(systemConfig.wifi_ssid) > 0) {
+        Serial.printf("[INFO] Conectando a %s...\n", systemConfig.wifi_ssid);
+        // Ya estamos en WIFI_AP_STA, solo iniciamos conexión
+        WiFi.begin(systemConfig.wifi_ssid, systemConfig.wifi_password);
+
+        int attempts = 0;
+        while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+            delay(500);
+            Serial.print(".");
+            attempts++;
+        }
+
+        if (WiFi.status() == WL_CONNECTED) {
+            Serial.printf("\n[OK] Conectado! IP: %s\n", WiFi.localIP().toString().c_str());
+            // Apagar AP cuando hay WiFi conectado
+            WiFi.softAPdisconnect(true);
+            WiFi.mode(WIFI_STA);
+            Serial.println("[INFO] AP apagado (WiFi conectado)");
+        } else {
+            Serial.println("\n[WARNING] No se pudo conectar, AP sigue activo");
+        }
     }
 
-    Serial.printf("  - Nombre: %s\n", systemConfig.device_name);
-    Serial.printf("  - WiFi configurado: %s\n", systemConfig.wifi_configured ? "Sí" : "No");
-    Serial.printf("  - MQTT habilitado: %s\n", systemConfig.mqtt_enabled ? "Sí" : "No");
-    Serial.printf("  - Frecuencia RF: %.2f MHz\n", systemConfig.default_frequency);
-
-    // 3. Inicializar servidor web y WiFi PRIMERO (antes del RF)
-    // IMPORTANTE: WiFi debe inicializarse antes que CC1101 para evitar
-    // interferencias durante la negociación WiFi 2.4GHz
-    Serial.println("\n[3/7] Iniciando WiFi y servidor web...");
-    webServer.begin(&systemConfig);
-
-    // 4. Esperar estabilización de WiFi antes de iniciar RF
-    Serial.println("\n[4/7] Esperando estabilización de WiFi...");
+    // 3. CC1101 - Solo inicializar si hay WiFi conectado (evita interferencia)
+    Serial.println("[3/6] CC1101...");
+    Serial.flush();
     if (WiFi.status() == WL_CONNECTED) {
-        delay(500);  // Pequeña pausa para estabilizar
-        Serial.println("[OK] WiFi estable");
+        if (!rfModule.begin()) {
+            Serial.println("[WARNING] CC1101 no detectado");
+        } else {
+            rfModule.setFrequency(systemConfig.default_frequency);
+            rfModule.setModulation(systemConfig.default_modulation);
+            Serial.println("[OK] CC1101 inicializado");
+            somfyRTS.begin(CC1101_GDO0);
+            dooyaBidir.begin();
+        }
     } else {
-        Serial.println("[INFO] Modo AP activo");
+        Serial.println("[INFO] CC1101 desactivado hasta conectar WiFi (evita interferencia)");
     }
+    Serial.flush();
 
-    // 5. Inicializar módulo RF DESPUÉS de WiFi estable
-    // Esto evita interferencias del ESP32 2.4GHz con el CC1101
-    Serial.println("\n[5/7] Inicializando módulo CC1101...");
-    if (!rfModule.begin()) {
-        Serial.println("[WARNING] CC1101 no detectado, continuando sin RF");
+    // 4. WebServer
+    Serial.println("[4/6] Iniciando WebServer...");
+    Serial.flush();
+    if (!webServer.begin(&systemConfig)) {
+        Serial.println("[WARNING] WebServer falló");
     } else {
-        rfModule.setFrequency(systemConfig.default_frequency);
-        rfModule.setModulation(systemConfig.default_modulation);
-        Serial.println("[OK] CC1101 inicializado correctamente");
-
-        // Inicializar módulo Somfy RTS (usa el mismo pin GDO0 para TX)
-        somfyRTS.begin(CC1101_GDO0);
-        Serial.println("[OK] Somfy RTS inicializado");
-
-        // Inicializar módulo Dooya Bidireccional
-        dooyaBidir.begin();
-        Serial.println("[OK] Dooya Bidireccional inicializado");
+        Serial.println("[OK] WebServer iniciado");
     }
+    Serial.flush();
 
-    // 6. Sincronizar tiempo (si hay WiFi)
-    Serial.println("\n[6/7] Configurando hora...");
+    // 5. Time
+    Serial.println("[5/6] Configurando hora...");
     if (WiFi.status() == WL_CONNECTED) {
         timeManager.begin(&systemConfig);
     } else {
-        Serial.println("[WARNING] Sin WiFi, hora no sincronizada");
+        Serial.println("[INFO] Sin WiFi, hora no sincronizada");
     }
 
-    // 7. Inicializar MQTT y publicar Auto-Discovery
-    Serial.println("\n[7/7] Configurando MQTT...");
+    // 6. MQTT
+    Serial.println("[6/6] Configurando MQTT...");
     if (systemConfig.mqtt_enabled && WiFi.status() == WL_CONNECTED) {
         mqttClient.begin(&systemConfig);
         mqttClient.setCommandCallback(handleRFCommand);
-
-        // Los dispositivos se publican automáticamente con MQTT Discovery
-        // Home Assistant los detectará como:
-        // - cover.* para cortinas
-        // - switch.* para interruptores
-        // - button.* para otros dispositivos
-        Serial.println("[OK] MQTT Discovery publicado para Home Assistant");
-    } else if (systemConfig.mqtt_enabled) {
-        Serial.println("[WARNING] MQTT habilitado pero sin WiFi");
+        Serial.println("[OK] MQTT configurado");
     } else {
-        Serial.println("[INFO] MQTT deshabilitado");
+        Serial.println("[INFO] MQTT deshabilitado o sin WiFi");
     }
 
-    // Cargar dispositivos
-    SavedDevice devices[MAX_DEVICES];
+    // Contar dispositivos sin cargarlos todos en RAM
+    // NOTA: No cargamos el array completo porque consume demasiada RAM
     uint8_t deviceCount = 0;
-    storage.loadDevices(devices, &deviceCount);
-    Serial.printf("\n[System] %d dispositivos cargados\n", deviceCount);
+    if (LittleFS.exists(DEVICES_FILE)) {
+        File f = LittleFS.open(DEVICES_FILE, "r");
+        if (f) {
+            // Contar llaves abiertas para estimar dispositivos
+            String content = f.readString();
+            f.close();
+            for (size_t i = 0; i < content.length(); i++) {
+                if (content[i] == '{') deviceCount++;
+            }
+            if (deviceCount > 0) deviceCount--; // El array tiene una llave extra
+        }
+    }
+    Serial.printf("[INFO] ~%d dispositivos guardados\n", deviceCount);
 
-    // Sistema listo
     systemReady = true;
 
     Serial.println();
     Serial.println("==============================================");
-    Serial.println("   SISTEMA LISTO - DIRASMART RF CONTROLLER");
+    Serial.println("   SISTEMA LISTO - RF CONTROLLER");
     Serial.println("==============================================");
     Serial.printf("   IP: %s\n", webServer.getIPAddress().c_str());
     Serial.printf("   Modo: %s\n", webServer.isAPMode() ? "Access Point" : "WiFi Cliente");
@@ -182,36 +186,20 @@ void initSystem() {
     if (rfModule.isConnected()) {
         Serial.printf("   RF: %.2f MHz\n", rfModule.getFrequency());
     }
-    if (mqttClient.isConnected()) {
-        Serial.println("   MQTT: Conectado (Auto-Discovery activo)");
-    }
+    Serial.println("==============================================");
+    Serial.printf("   Heap libre: %d bytes\n", ESP.getFreeHeap());
     Serial.println("==============================================");
     Serial.println();
 }
 
 void printStatus() {
-    Serial.println("\n--- Estado del Sistema ---");
-    Serial.printf("Uptime: %lu segundos\n", millis() / 1000);
-    Serial.printf("Heap libre: %d bytes\n", ESP.getFreeHeap());
-    Serial.printf("WiFi: %s\n", webServer.isConnected() ? "Conectado" : "Desconectado");
-    Serial.printf("MQTT: %s\n", mqttClient.isConnected() ? "Conectado" : "Desconectado");
-    Serial.printf("RF CC1101: %s\n", rfModule.isConnected() ? "OK" : "Error");
-
-    if (rfModule.isConnected()) {
-        Serial.printf("RF Frecuencia: %.2f MHz\n", rfModule.getFrequency());
-        Serial.printf("RF RSSI: %d dBm\n", rfModule.getRSSI());
-    }
-
-    if (timeManager.isSynced()) {
-        Serial.printf("Hora: %s\n", timeManager.getDateTimeString().c_str());
-    }
-
-    Serial.println("--------------------------\n");
+    Serial.printf("Uptime: %lu s | Heap: %d bytes\n", millis() / 1000, ESP.getFreeHeap());
 }
 
 void handleRFCommand(const char* deviceId, const char* command) {
-    Serial.printf("[Main] Comando RF recibido: %s -> %s\n", deviceId, command);
+    Serial.printf("[Main] Comando: %s -> %s\n", deviceId, command);
 
+    // Cargar solo UN dispositivo (no el array completo)
     SavedDevice device;
     if (!storage.getDevice(deviceId, &device)) {
         Serial.println("[Main] Dispositivo no encontrado");
@@ -221,127 +209,62 @@ void handleRFCommand(const char* deviceId, const char* command) {
     String cmd = String(command);
     cmd.toLowerCase();
 
-    // Manejar dispositivos Somfy RTS de forma especial (rolling code)
+    // Somfy RTS
     if (device.type == DEVICE_CURTAIN_SOMFY) {
-        Serial.printf("[Main] Comando Somfy RTS para %s\n", device.name);
-
-        // Configurar el módulo RF para Somfy (433.42 MHz)
         rfModule.setFrequency(SOMFY_FREQUENCY);
-
-        // Configurar el control virtual
         somfyRTS.setRemote(&device.somfy);
 
         bool success = false;
-        if (cmd == "open" || cmd == "up") {
-            success = somfyRTS.sendUp();
-        } else if (cmd == "close" || cmd == "down") {
-            success = somfyRTS.sendDown();
-        } else if (cmd == "stop" || cmd == "my") {
-            success = somfyRTS.sendStop();
-        } else if (cmd == "prog") {
-            success = somfyRTS.sendProg();
-        }
+        if (cmd == "open" || cmd == "up") success = somfyRTS.sendUp();
+        else if (cmd == "close" || cmd == "down") success = somfyRTS.sendDown();
+        else if (cmd == "stop" || cmd == "my") success = somfyRTS.sendStop();
+        else if (cmd == "prog") success = somfyRTS.sendProg();
 
         if (success) {
-            // Actualizar rolling code en storage
             storage.updateSomfyRollingCode(deviceId, somfyRTS.getRollingCode());
-            device.lastUsed = millis();
-            storage.updateDevice(deviceId, &device);
         }
         return;
     }
 
-    // Manejar dispositivos Dooya Bidireccional (DDxxxx con FSK)
+    // Dooya Bidireccional
     if (device.type == DEVICE_CURTAIN_DOOYA_BIDIR) {
-        Serial.printf("[Main] Comando Dooya Bidir para %s\n", device.name);
-
-        // Configurar el control virtual
         dooyaBidir.setRemote(&device.dooyaBidir);
 
-        bool success = false;
-        if (cmd == "open" || cmd == "up") {
-            success = dooyaBidir.sendUp();
-        } else if (cmd == "close" || cmd == "down") {
-            success = dooyaBidir.sendDown();
-        } else if (cmd == "stop") {
-            success = dooyaBidir.sendStop();
-        } else if (cmd == "prog") {
-            success = dooyaBidir.sendProg();
-        }
-
-        if (success) {
-            device.lastUsed = millis();
-            storage.updateDevice(deviceId, &device);
-        }
+        if (cmd == "open" || cmd == "up") dooyaBidir.sendUp();
+        else if (cmd == "close" || cmd == "down") dooyaBidir.sendDown();
+        else if (cmd == "stop") dooyaBidir.sendStop();
+        else if (cmd == "prog") dooyaBidir.sendProg();
         return;
     }
 
-    // Interpretar comando según tipo de dispositivo funcional (señales capturadas)
+    // Dispositivos con señales capturadas
     int signalIndex = -1;
-
     switch (device.type) {
         case DEVICE_CURTAIN:
-            // Cortinas: señal 0=abrir, 1=cerrar, 2=parar
             if (cmd == "open" || cmd == "up") signalIndex = 0;
             else if (cmd == "close" || cmd == "down") signalIndex = 1;
             else if (cmd == "stop") signalIndex = 2;
             break;
-
         case DEVICE_SWITCH:
         case DEVICE_LIGHT:
-            // Interruptores/Luces: 0=encender, 1=apagar
-            if (cmd == "on" || cmd == "1") signalIndex = 0;
-            else if (cmd == "off" || cmd == "0") signalIndex = 1;
-            else if (cmd == "toggle") signalIndex = 0;
+            if (cmd == "on") signalIndex = 0;
+            else if (cmd == "off") signalIndex = 1;
             break;
-
         case DEVICE_BUTTON:
-            // Botones: cualquier comando activa señal 0
             signalIndex = 0;
             break;
-
         case DEVICE_GATE:
-            // Portones: 0=toggle/abrir, 1=cerrar
             if (cmd == "open" || cmd == "toggle") signalIndex = 0;
             else if (cmd == "close") signalIndex = 1;
             break;
-
-        case DEVICE_FAN:
-            // Ventiladores: 0=encender, 1=apagar, 2=velocidad
-            if (cmd == "on") signalIndex = 0;
-            else if (cmd == "off") signalIndex = 1;
-            else if (cmd == "speed") signalIndex = 2;
-            break;
-
-        case DEVICE_DIMMER:
-            // Dimmers: 0=encender, 1=apagar, 2=subir, 3=bajar
-            if (cmd == "on") signalIndex = 0;
-            else if (cmd == "off") signalIndex = 1;
-            else if (cmd == "up" || cmd == "brightness_up") signalIndex = 2;
-            else if (cmd == "down" || cmd == "brightness_down") signalIndex = 3;
-            break;
-
         default:
-            // Para DEVICE_OTHER y otros, intentar como índice numérico
             signalIndex = cmd.toInt();
             break;
     }
 
-    if (signalIndex >= 0 && signalIndex < device.signalCount) {
-        if (device.signals[signalIndex].valid) {
-            Serial.printf("[Main] Transmitiendo señal %d de %s\n", signalIndex, device.name);
-
-            rfModule.setFrequency(device.signals[signalIndex].frequency);
-            rfModule.setModulation(device.signals[signalIndex].modulation);
-            rfModule.transmitSignal(&device.signals[signalIndex]);
-
-            // Actualizar último uso
-            device.lastUsed = millis();
-            storage.updateDevice(deviceId, &device);
-        } else {
-            Serial.printf("[Main] Señal %d no válida\n", signalIndex);
-        }
-    } else {
-        Serial.printf("[Main] Índice de señal inválido: %d\n", signalIndex);
+    if (signalIndex >= 0 && signalIndex < device.signalCount && device.signals[signalIndex].valid) {
+        rfModule.setFrequency(device.signals[signalIndex].frequency);
+        rfModule.setModulation(device.signals[signalIndex].modulation);
+        rfModule.transmitSignal(&device.signals[signalIndex]);
     }
 }

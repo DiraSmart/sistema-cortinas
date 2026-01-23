@@ -361,12 +361,23 @@ function renderDeviceSignals(device) {
         const signal = signals.find(s => s && s.index === idx);
         const hasSignal = signal && signal.valid;
 
+        const freqRounded = hasSignal ? parseFloat(signal.frequency).toFixed(2) : '';
+        const repeatCount = hasSignal ? (signal.repeatCount || 5) : 5;
+
         html += `
             <div class="signal-slot ${hasSignal ? 'configured' : 'empty'}">
                 <div class="signal-slot-header">
                     <span class="signal-slot-name">${signalName}</span>
-                    ${hasSignal ? `<span class="signal-slot-info">${signal.frequency} MHz</span>` : ''}
+                    ${hasSignal ? `<span class="signal-slot-info">${freqRounded} MHz</span>` : ''}
                 </div>
+                ${hasSignal ? `
+                <div class="signal-slot-repeat">
+                    <label>Repeticiones:</label>
+                    <input type="number" class="repeat-input" id="repeat-${device.id}-${idx}"
+                           value="${repeatCount}" min="1" max="20"
+                           onchange="updateSignalRepeat('${device.id}', ${idx}, this.value)">
+                </div>
+                ` : ''}
                 <div class="signal-slot-actions">
                     ${hasSignal ? `
                         <button class="btn btn-small btn-success" onclick="transmitSignal('${device.id}', ${idx})">Probar</button>
@@ -460,6 +471,42 @@ async function deleteDevice() {
         }
     } catch (error) {
         console.error('Error deleting device:', error);
+        showToast('Error de conexión', 'error');
+    }
+}
+
+// ============================================
+// Actualizar repeticiones de señal
+// ============================================
+
+async function updateSignalRepeat(deviceId, signalIndex, repeatCount) {
+    repeatCount = Math.max(1, Math.min(20, parseInt(repeatCount) || 5));
+
+    try {
+        const response = await fetch('/api/signal/repeat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                deviceId,
+                signalIndex,
+                repeatCount
+            })
+        });
+
+        const data = await response.json();
+        if (data.success) {
+            showToast(`Repeticiones actualizadas a ${repeatCount}`, 'success');
+            // Update local cache
+            const device = devices.find(d => d.id === deviceId);
+            if (device && device.signals) {
+                const signal = device.signals.find(s => s && s.index === signalIndex);
+                if (signal) signal.repeatCount = repeatCount;
+            }
+        } else {
+            showToast(data.error || 'Error al actualizar', 'error');
+        }
+    } catch (error) {
+        console.error('Error updating repeat count:', error);
         showToast('Error de conexión', 'error');
     }
 }
@@ -622,6 +669,12 @@ function showCapturedSignal(data) {
     document.getElementById('signal-frequency').textContent = data.frequency;
     document.getElementById('signal-modulation').textContent = getModulationName(data.modulation);
 
+    // Set repeat count from captured signal or default
+    const repeatInput = document.getElementById('signal-repeat-count');
+    if (repeatInput) {
+        repeatInput.value = data.repeatCount || 5;
+    }
+
     // Mostrar protocolo detectado
     const protocolEl = document.getElementById('signal-protocol');
     if (protocolEl) {
@@ -630,6 +683,12 @@ function showCapturedSignal(data) {
 
     // Análisis detallado
     document.getElementById('signal-analysis').textContent = data.analysis || generateAnalysis(data);
+
+    // Mostrar datos RAW en formato legible
+    const rawDataEl = document.getElementById('signal-raw-data');
+    if (rawDataEl && data.data) {
+        rawDataEl.textContent = formatRawSignal(data.data);
+    }
 }
 
 function generateAnalysis(data) {
@@ -652,11 +711,85 @@ function getModulationName(mod) {
     return mods[mod] || 'Desconocida';
 }
 
+function formatRawSignal(hexData) {
+    if (!hexData || hexData.length < 4) return 'Sin datos';
+
+    // Convert hex string to pulse durations (each pulse is 2 bytes = 4 hex chars)
+    const pulses = [];
+    for (let i = 0; i < hexData.length - 3; i += 4) {
+        const highByte = parseInt(hexData.substr(i, 2), 16);
+        const lowByte = parseInt(hexData.substr(i + 2, 2), 16);
+        const duration = (highByte << 8) | lowByte;
+        if (duration > 0 && duration < 50000) {
+            pulses.push(duration);
+        }
+    }
+
+    if (pulses.length === 0) return 'Sin pulsos válidos';
+
+    // ESPHome format: positive = HIGH, negative = LOW
+    const esphomePulses = pulses.map((p, i) => i % 2 === 0 ? p : -p);
+
+    let output = `Total: ${pulses.length} pulsos\n`;
+    output += `================================================\n\n`;
+
+    // ESPHome raw format (copy-paste ready)
+    output += `FORMATO ESPHOME (copiar/pegar):\n`;
+    output += `------------------------------------------------\n`;
+    output += `code: [`;
+
+    // Format in rows of 8 values
+    for (let i = 0; i < esphomePulses.length; i++) {
+        if (i > 0) output += ', ';
+        if (i > 0 && i % 8 === 0) output += '\n       ';
+        output += esphomePulses[i];
+    }
+    output += `]\n\n`;
+
+    // Timing analysis
+    output += `ANALISIS DE TIEMPOS:\n`;
+    output += `------------------------------------------------\n`;
+
+    const highPulses = pulses.filter((_, i) => i % 2 === 0);
+    const lowPulses = pulses.filter((_, i) => i % 2 === 1);
+
+    if (highPulses.length > 0) {
+        const avgHigh = Math.round(highPulses.reduce((a, b) => a + b, 0) / highPulses.length);
+        const minHigh = Math.min(...highPulses);
+        const maxHigh = Math.max(...highPulses);
+        output += `HIGH: min=${minHigh}us, max=${maxHigh}us, avg=${avgHigh}us\n`;
+    }
+
+    if (lowPulses.length > 0) {
+        const avgLow = Math.round(lowPulses.reduce((a, b) => a + b, 0) / lowPulses.length);
+        const minLow = Math.min(...lowPulses);
+        const maxLow = Math.max(...lowPulses);
+        output += `LOW:  min=${minLow}us, max=${maxLow}us, avg=${avgLow}us\n`;
+    }
+
+    // Visual pulse table
+    output += `\nPULSOS DETALLADOS:\n`;
+    output += `------------------------------------------------\n`;
+    for (let i = 0; i < Math.min(pulses.length, 50); i++) {
+        const isHigh = i % 2 === 0;
+        output += `${(i).toString().padStart(2)}) ${isHigh ? 'HIGH' : 'LOW '} ${pulses[i].toString().padStart(5)}us\n`;
+    }
+    if (pulses.length > 50) {
+        output += `... y ${pulses.length - 50} pulsos mas\n`;
+    }
+
+    return output;
+}
+
 async function testCapturedSignal() {
     if (!capturedSignal || !capturedSignal.data) {
         showToast('No hay señal para probar', 'error');
         return;
     }
+
+    // Get repeat count from UI
+    const repeatInput = document.getElementById('signal-repeat-count');
+    const repeatCount = repeatInput ? parseInt(repeatInput.value) || 5 : 5;
 
     try {
         const response = await fetch('/api/rf/test', {
@@ -665,7 +798,8 @@ async function testCapturedSignal() {
             body: JSON.stringify({
                 data: capturedSignal.data,
                 frequency: capturedSignal.frequency,
-                modulation: capturedSignal.modulation
+                modulation: capturedSignal.modulation,
+                repeatCount: repeatCount
             })
         });
 
@@ -699,6 +833,10 @@ async function saveCurrentCapture() {
     const typeInfo = DEVICE_TYPES[device?.type] || DEVICE_TYPES[99];
     const signalName = typeInfo.signals[parseInt(signalSlot)] || 'Señal';
 
+    // Get repeat count from UI
+    const repeatInput = document.getElementById('signal-repeat-count');
+    const repeatCount = repeatInput ? parseInt(repeatInput.value) || 5 : 5;
+
     try {
         const response = await fetch('/api/rf/signal/save', {
             method: 'POST',
@@ -710,7 +848,8 @@ async function saveCurrentCapture() {
                 data: capturedSignal.data,
                 frequency: capturedSignal.frequency,
                 modulation: capturedSignal.modulation,
-                protocol: capturedSignal.protocol
+                protocol: capturedSignal.protocol,
+                repeatCount: repeatCount
             })
         });
 
@@ -850,9 +989,37 @@ async function saveConfig() {
     }
 }
 
+async function mqttRediscover() {
+    try {
+        showToast('Publicando discovery MQTT...', 'success');
+        const response = await fetch('/api/mqtt/rediscover', { method: 'POST' });
+        const data = await response.json();
+        if (data.success) {
+            showToast('Discovery publicado correctamente', 'success');
+        } else {
+            showToast(data.error || 'Error en discovery', 'error');
+        }
+    } catch (error) {
+        console.error('Error MQTT rediscover:', error);
+        showToast('Error de conexión', 'error');
+    }
+}
+
 // ============================================
 // WiFi
 // ============================================
+
+function toggleManualSSID() {
+    const select = document.getElementById('wifi-ssid');
+    const manualGroup = document.getElementById('manual-ssid-group');
+
+    if (select.value === '__manual__') {
+        manualGroup.style.display = 'block';
+        document.getElementById('wifi-ssid-manual').focus();
+    } else {
+        manualGroup.style.display = 'none';
+    }
+}
 
 async function scanWiFi() {
     try {
@@ -861,32 +1028,42 @@ async function scanWiFi() {
         const data = await response.json();
 
         const select = document.getElementById('wifi-ssid');
-        select.innerHTML = '<option value="">Seleccionar red...</option>';
+        select.innerHTML = '<option value="">Seleccionar red...</option><option value="__manual__">Ingresar manualmente...</option>';
 
-        data.networks.forEach(net => {
-            const option = document.createElement('option');
-            option.value = net.ssid;
-            option.textContent = `${net.ssid} (${net.rssi} dBm)${net.encrypted ? ' 🔒' : ''}`;
-            select.appendChild(option);
-        });
-
-        showToast(`${data.networks.length} redes encontradas`, 'success');
+        if (data.networks && data.networks.length > 0) {
+            data.networks.forEach(net => {
+                const option = document.createElement('option');
+                option.value = net.ssid;
+                option.textContent = `${net.ssid} (${net.rssi} dBm)${net.encrypted ? ' 🔒' : ''}`;
+                select.appendChild(option);
+            });
+            showToast(`${data.networks.length} redes encontradas`, 'success');
+        } else {
+            showToast('No se encontraron redes. Ingresa el SSID manualmente.', 'warning');
+            select.value = '__manual__';
+            toggleManualSSID();
+        }
     } catch (error) {
         console.error('Error scanning WiFi:', error);
-        showToast('Error al buscar redes', 'error');
+        showToast('Error al buscar redes. Ingresa el SSID manualmente.', 'error');
     }
 }
 
 async function connectWiFi() {
-    const ssid = document.getElementById('wifi-ssid').value;
+    const selectValue = document.getElementById('wifi-ssid').value;
+    const manualSSID = document.getElementById('wifi-ssid-manual')?.value?.trim();
     const password = document.getElementById('wifi-password').value;
 
+    // Usar SSID manual si está seleccionada esa opción
+    const ssid = (selectValue === '__manual__') ? manualSSID : selectValue;
+
     if (!ssid) {
-        showToast('Selecciona una red WiFi', 'error');
+        showToast('Ingresa o selecciona una red WiFi', 'error');
         return;
     }
 
     try {
+        showToast('Conectando a ' + ssid + '...', 'success');
         const response = await fetch('/api/wifi/connect', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -895,7 +1072,7 @@ async function connectWiFi() {
 
         const data = await response.json();
         if (data.success) {
-            showToast('Conectando a WiFi...', 'success');
+            showToast('Guardado. El dispositivo se reiniciará para conectar.', 'success');
             setTimeout(loadStatus, 5000);
         } else {
             showToast(data.error || 'Error al conectar', 'error');
