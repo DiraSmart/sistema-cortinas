@@ -7,7 +7,6 @@
 let devices = [];
 let config = {};
 let capturedSignal = null;
-let ws = null;
 let currentEditDevice = null;
 let identifyMode = false;
 
@@ -45,7 +44,6 @@ const PROTOCOLS = {
 
 document.addEventListener('DOMContentLoaded', function() {
     initTabs();
-    initWebSocket();
     loadStatus();
     loadDevices();
     loadConfig();
@@ -82,50 +80,6 @@ function initTabs() {
         freqSelect.addEventListener('change', () => {
             customFreq.style.display = freqSelect.value === 'custom' ? 'block' : 'none';
         });
-    }
-}
-
-// ============================================
-// WebSocket
-// ============================================
-
-function initWebSocket() {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws`;
-
-    ws = new WebSocket(wsUrl);
-
-    ws.onopen = () => {
-        console.log('WebSocket conectado');
-        ws.send(JSON.stringify({ cmd: 'status' }));
-    };
-
-    ws.onmessage = (event) => {
-        try {
-            const data = JSON.parse(event.data);
-            handleWebSocketMessage(data);
-        } catch (e) {
-            console.error('Error parsing WebSocket message:', e);
-        }
-    };
-
-    ws.onclose = () => {
-        console.log('WebSocket desconectado, reconectando...');
-        setTimeout(initWebSocket, 3000);
-    };
-
-    ws.onerror = (error) => {
-        console.error('WebSocket error:', error);
-    };
-}
-
-function handleWebSocketMessage(data) {
-    if (data.type === 'status') {
-        updateStatusIndicators(data);
-    } else if (data.type === 'signal_captured') {
-        if (data.valid) {
-            showToast('Señal capturada correctamente', 'success');
-        }
     }
 }
 

@@ -514,6 +514,7 @@ void MQTTClientManager::publishSystemButtons() {
         doc["avty_t"] = availabilityTopic;
         doc["pl_prs"] = "PRESS";
         doc["ic"] = "mdi:refresh";
+        doc["ent_cat"] = "config";
 
         JsonObject dev = doc.createNestedObject("dev");
         JsonArray ids = dev.createNestedArray("ids");
@@ -542,6 +543,7 @@ void MQTTClientManager::publishSystemButtons() {
         doc["pl_prs"] = "PRESS";
         doc["ic"] = "mdi:restart";
         doc["dev_cla"] = "restart";
+        doc["ent_cat"] = "config";
 
         JsonObject dev = doc.createNestedObject("dev");
         JsonArray ids = dev.createNestedArray("ids");
