@@ -15,8 +15,11 @@ build/
 *.o
 *.obj
 *.elf
-*.bin
 *.hex
+
+# Binaries (except versions folder)
+*.bin
+!versions/**/*.bin
 
 # IDE specific
 .idea/
@@ -53,7 +56,7 @@ node_modules/
 .env.local
 secrets.h
 
-# LittleFS data partition image
-data.bin
-littlefs.bin
-spiffs.bin
+# LittleFS data partition image (root only)
+/data.bin
+/littlefs.bin
+/spiffs.bin
