@@ -251,9 +251,14 @@ body {
     padding: 10px 12px;
     border: 1px solid rgba(255,255,255,0.2);
     border-radius: var(--radius);
-    background: rgba(255,255,255,0.1);
+    background: var(--bg-darker);
     color: var(--light);
     font-size: 1rem;
+}
+
+.form-group select option {
+    background: var(--bg-darker);
+    color: var(--light);
 }
 
 .form-group input:focus,
@@ -272,6 +277,19 @@ body {
 .form-group input[type="checkbox"] {
     width: auto;
     margin-right: 8px;
+}
+
+.input-with-button {
+    display: flex;
+    gap: 8px;
+}
+
+.input-with-button input {
+    flex: 1;
+}
+
+.input-with-button .btn {
+    white-space: nowrap;
 }
 
 /* ============================================
@@ -299,7 +317,12 @@ body {
     padding: 8px 12px;
     border: 1px solid rgba(255,255,255,0.2);
     border-radius: var(--radius);
-    background: rgba(255,255,255,0.1);
+    background: var(--bg-darker);
+    color: var(--light);
+}
+
+.filter-bar select option {
+    background: var(--bg-darker);
     color: var(--light);
 }
 
@@ -419,6 +442,13 @@ body {
 
 .frequency-selector select {
     flex: 1;
+    background: var(--bg-darker);
+    color: var(--light);
+}
+
+.frequency-selector select option {
+    background: var(--bg-darker);
+    color: var(--light);
 }
 
 .capture-controls {
@@ -582,6 +612,28 @@ body {
     text-align: center;
 }
 
+.signal-slot-invert {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+    font-size: 0.85rem;
+}
+
+.signal-slot-invert label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--gray);
+    cursor: pointer;
+}
+
+.signal-slot-invert input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+}
+
 .signal-slot-actions {
     display: flex;
     gap: 8px;
@@ -618,6 +670,13 @@ body {
 
 .wifi-select select {
     flex: 1;
+    background: var(--bg-darker);
+    color: var(--light);
+}
+
+.wifi-select select option {
+    background: var(--bg-darker);
+    color: var(--light);
 }
 
 .system-info {
@@ -949,4 +1008,218 @@ body {
 
 .empty-state h3 {
     margin-bottom: 10px;
+}
+
+/* ============================================
+   Signal Identification Section
+   ============================================ */
+
+.identify-panel {
+    background: var(--card-bg);
+    border-radius: var(--radius);
+    padding: 25px;
+}
+
+.identify-panel h2 {
+    margin-bottom: 15px;
+}
+
+.frequency-list {
+    background: rgba(108, 92, 231, 0.1);
+    border-radius: var(--radius);
+    padding: 15px;
+    margin: 20px 0;
+    border: 1px solid rgba(108, 92, 231, 0.2);
+}
+
+.frequency-list h4 {
+    margin-bottom: 8px;
+    color: var(--primary);
+    font-size: 0.9rem;
+}
+
+.frequency-list p {
+    color: var(--gray);
+    font-family: monospace;
+    font-size: 0.85rem;
+    line-height: 1.5;
+}
+
+#identify-progress {
+    font-size: 0.9rem;
+    margin-top: 5px;
+}
+
+.identify-section {
+    margin-top: 30px;
+    padding-top: 30px;
+    border-top: 2px solid rgba(255,255,255,0.1);
+    background: linear-gradient(180deg, rgba(108, 92, 231, 0.05) 0%, transparent 100%);
+    border-radius: var(--radius);
+    padding: 25px;
+}
+
+.identify-section h3 {
+    color: var(--primary);
+    margin-bottom: 10px;
+}
+
+.identify-controls {
+    margin: 20px 0;
+    text-align: center;
+}
+
+.identify-status {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 15px;
+    padding: 30px;
+    background: rgba(0,0,0,0.2);
+    border-radius: var(--radius);
+    margin: 20px 0;
+}
+
+.identify-status p {
+    color: var(--light);
+    font-size: 1rem;
+}
+
+.identify-result {
+    background: var(--dark);
+    border-radius: var(--radius);
+    padding: 20px;
+    margin-top: 20px;
+    border: 1px solid rgba(108, 92, 231, 0.3);
+}
+
+.identify-result h4 {
+    color: var(--success);
+    margin-bottom: 15px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.identify-result h4::before {
+    content: "✓";
+    background: var(--success);
+    color: var(--dark);
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+}
+
+.identify-info {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 15px;
+    margin-bottom: 20px;
+}
+
+.info-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 10px;
+    background: rgba(255,255,255,0.05);
+    border-radius: 6px;
+}
+
+.info-label {
+    color: var(--gray);
+    font-size: 0.85rem;
+}
+
+.info-value {
+    color: var(--light);
+    font-weight: 600;
+}
+
+.identify-analysis {
+    margin-top: 20px;
+}
+
+.identify-analysis h5 {
+    color: var(--light);
+    margin-bottom: 10px;
+}
+
+.identify-analysis pre {
+    background: rgba(0,0,0,0.3);
+    padding: 15px;
+    border-radius: 6px;
+    font-size: 0.8rem;
+    color: var(--gray);
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 200px;
+}
+
+.identify-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 20px;
+    flex-wrap: wrap;
+}
+
+.identify-actions .btn {
+    flex: 1;
+    min-width: 150px;
+}
+
+/* Protocol info for Somfy/Dooya */
+.protocol-info {
+    padding: 20px;
+    background: rgba(108, 92, 231, 0.1);
+    border-radius: var(--radius);
+    border: 1px solid rgba(108, 92, 231, 0.3);
+}
+
+.protocol-info h4 {
+    color: var(--primary);
+    margin-bottom: 15px;
+}
+
+.protocol-info p {
+    margin: 8px 0;
+    color: var(--light);
+}
+
+.protocol-info .help-text {
+    color: var(--gray);
+    font-size: 0.85rem;
+    margin-top: 15px;
+}
+
+.protocol-config {
+    margin-top: 15px;
+    padding: 15px;
+    background: rgba(0,0,0,0.2);
+    border-radius: var(--radius);
+}
+
+/* ============================================
+   Fix dropdowns - dark background for options
+   ============================================ */
+
+select {
+    background: var(--bg-darker) !important;
+    color: var(--light) !important;
+}
+
+select option {
+    background: var(--bg-darker);
+    color: var(--light);
+    padding: 8px;
+}
+
+select option:hover,
+select option:checked {
+    background: var(--primary);
+    color: var(--white);
 }

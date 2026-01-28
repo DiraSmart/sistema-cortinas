@@ -3,6 +3,7 @@
 #include <ElegantOTA.h>
 #include "SomfyRTS.h"
 #include "DooyaBidir.h"
+#include "AOK_Protocol.h"
 #include "MQTTClient.h"
 
 WebServerManager webServer;
@@ -83,6 +84,10 @@ bool WebServerManager::connectWiFi(const char* ssid, const char* password) {
     // No cambiar modo ni reconectar si ya está conectado
     if (WiFi.status() != WL_CONNECTED) {
         WiFi.mode(WIFI_STA);
+        // Configurar hostname si está disponible
+        if (sysConfig && strlen(sysConfig->device_name) > 0) {
+            WiFi.setHostname(sysConfig->device_name);
+        }
         WiFi.begin(ssid, password);
     }
 
@@ -137,6 +142,7 @@ void WebServerManager::loop() {
     static unsigned long wifiLostTime = 0;
     static unsigned long apModeStartTime = 0;
     static unsigned long lastReconnectTry = 0;
+    static uint8_t reconnectAttempts = 0;
 
     if (!server || !sysConfig) return;
 
@@ -149,26 +155,45 @@ void WebServerManager::loop() {
     if (sysConfig->wifi_configured && !connected) {
         if (wifiLostTime == 0) {
             wifiLostTime = millis();
-            Serial.println("[Web] WiFi perdido, esperando 2 min antes de AP...");
+            reconnectAttempts = 0;
+            Serial.println("[Web] WiFi perdido, iniciando reconexión...");
+        }
+
+        unsigned long timeSinceLost = millis() - wifiLostTime;
+        unsigned long reconnectInterval;
+
+        // Reconexión agresiva: más frecuente al inicio
+        if (timeSinceLost < 30000) {
+            reconnectInterval = 5000;   // Primeros 30s: cada 5 segundos
+        } else if (timeSinceLost < 120000) {
+            reconnectInterval = 15000;  // 30s-2min: cada 15 segundos
+        } else {
+            reconnectInterval = 30000;  // Después: cada 30 segundos
         }
 
         // Si no está en modo AP y pasaron 2 minutos, encender AP
-        if (!apMode && (millis() - wifiLostTime > 120000)) {
-            Serial.println("[Web] Encendiendo modo AP...");
+        if (!apMode && timeSinceLost > 120000) {
+            Serial.println("[Web] 2 min sin WiFi, encendiendo AP de respaldo...");
             startAP();
             apModeStartTime = millis();
         }
 
-        // Si está en modo AP, intentar reconectar cada 30 segundos
-        if (apMode && (millis() - lastReconnectTry > 30000)) {
+        // Intentar reconectar según el intervalo calculado
+        if (millis() - lastReconnectTry > reconnectInterval) {
             lastReconnectTry = millis();
-            Serial.println("[Web] Intentando reconectar WiFi...");
+            reconnectAttempts++;
+            Serial.printf("[Web] Intento reconexión #%d a %s...\n", reconnectAttempts, sysConfig->wifi_ssid);
+
+            // Forzar reconexión
+            WiFi.disconnect(false);
+            delay(100);
+            WiFi.setHostname(sysConfig->device_name);
             WiFi.begin(sysConfig->wifi_ssid, sysConfig->wifi_password);
         }
 
         // Si lleva 30 minutos en modo AP sin reconectar, reiniciar
         if (apMode && (millis() - apModeStartTime > 1800000)) {
-            Serial.println("[Web] 30 min sin WiFi, reiniciando...");
+            Serial.println("[Web] 30 min sin WiFi, reiniciando sistema...");
             delay(1000);
             ESP.restart();
         }
@@ -176,12 +201,17 @@ void WebServerManager::loop() {
 
     // Si reconectó WiFi
     if (connected) {
-        wifiLostTime = 0;  // Reset timer
+        if (wifiLostTime > 0) {
+            unsigned long downtime = (millis() - wifiLostTime) / 1000;
+            Serial.printf("[Web] WiFi reconectado tras %lu segundos (%d intentos)\n", downtime, reconnectAttempts);
+        }
+        wifiLostTime = 0;
         apModeStartTime = 0;
+        reconnectAttempts = 0;
 
         // Si está en modo AP, apagarlo
         if (apMode) {
-            Serial.println("[Web] WiFi reconectado, apagando AP...");
+            Serial.println("[Web] Apagando AP (WiFi estable)...");
             WiFi.softAPdisconnect(true);
             WiFi.mode(WIFI_STA);
             apMode = false;
@@ -204,7 +234,16 @@ void WebServerManager::setSignalTransmitCallback(void (*callback)(const char* de
 void WebServerManager::handleCORS() {
     server->sendHeader("Access-Control-Allow-Origin", "*");
     server->sendHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-    server->sendHeader("Access-Control-Allow-Headers", "Content-Type");
+    server->sendHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+}
+
+bool WebServerManager::checkAuth() {
+    // Verificar si hay credenciales de autenticación básica
+    if (!server->authenticate(WEB_AUTH_USER, WEB_AUTH_PASSWORD)) {
+        server->requestAuthentication(BASIC_AUTH, "RF Controller", "Acceso denegado");
+        return false;
+    }
+    return true;
 }
 
 void WebServerManager::setupRoutes() {
@@ -216,6 +255,7 @@ void WebServerManager::setupRoutes() {
     server->on("/api/rf/signal/delete", HTTP_OPTIONS, [this]() { handleCORS(); server->send(204); });
     server->on("/api/rf/test", HTTP_OPTIONS, [this]() { handleCORS(); server->send(204); });
     server->on("/api/signal/repeat", HTTP_OPTIONS, [this]() { handleCORS(); server->send(204); });
+    server->on("/api/signal/invert", HTTP_OPTIONS, [this]() { handleCORS(); server->send(204); });
     server->on("/api/restore", HTTP_OPTIONS, [this]() { handleCORS(); server->send(204); });
     server->on("/api/wifi/connect", HTTP_OPTIONS, [this]() { handleCORS(); server->send(204); });
 
@@ -235,8 +275,11 @@ void WebServerManager::setupRoutes() {
     server->on("/api/rf/signal/delete", HTTP_POST, [this]() { handleDeleteSignal(); });
     server->on("/api/rf/test", HTTP_POST, [this]() { handleTestSignal(); });
     server->on("/api/signal/repeat", HTTP_POST, [this]() { handleUpdateSignalRepeat(); });
+    server->on("/api/signal/invert", HTTP_POST, [this]() { handleUpdateSignalInvert(); });
     server->on("/api/rf/frequency", HTTP_GET, [this]() { handleSetFrequency(); });
     server->on("/api/rf/scan", HTTP_GET, [this]() { handleScanFrequency(); });
+    server->on("/api/rf/identify", HTTP_GET, [this]() { handleIdentifySignal(); });
+    server->on("/api/rf/decode-aok", HTTP_POST, [this]() { handleDecodeAOK(); });
     server->on("/api/backup", HTTP_GET, [this]() { handleBackup(); });
     server->on("/api/restore", HTTP_POST, [this]() { handleRestore(); });
     server->on("/api/wifi/scan", HTTP_GET, [this]() { handleWiFiScan(); });
@@ -248,6 +291,8 @@ void WebServerManager::setupRoutes() {
 }
 
 void WebServerManager::handleRoot() {
+    if (!checkAuth()) return;
+
     if (LittleFS.exists("/index.html")) {
         File file = LittleFS.open("/index.html", "r");
         server->streamFile(file, "text/html");
@@ -270,6 +315,9 @@ void WebServerManager::handleNotFound() {
         server->send(204);
         return;
     }
+
+    // Requiere autenticación para archivos estáticos
+    if (!checkAuth()) return;
 
     String path = server->uri();
     if (LittleFS.exists(path)) {
@@ -328,6 +376,7 @@ void WebServerManager::handleGetConfig() {
 
 void WebServerManager::handleSaveConfig() {
     handleCORS();
+    if (!checkAuth()) return;
 
     if (!server->hasArg("plain")) {
         sendJsonError(400, "No data received");
@@ -440,6 +489,7 @@ void WebServerManager::handleGetDevices() {
 
 void WebServerManager::handleAddDevice() {
     handleCORS();
+    if (!checkAuth()) return;
 
     if (!server->hasArg("plain")) {
         sendJsonError(400, "No data received");
@@ -475,6 +525,12 @@ void WebServerManager::handleAddDevice() {
         device.dooyaBidir.unitCode = doc["dooya_unit_code"] | 1;
     }
 
+    if (device.type == DEVICE_CURTAIN_AOK) {
+        device.aok.remoteId = doc["aok_remote_id"] | 0;
+        // Channel 0 is valid (group control), so check if key exists before defaulting
+        device.aok.channel = doc.containsKey("aok_channel") ? (uint8_t)doc["aok_channel"].as<int>() : 1;
+    }
+
     if (storage.addDevice(&device)) {
         StaticJsonDocument<256> response;
         response["success"] = true;
@@ -490,6 +546,7 @@ void WebServerManager::handleAddDevice() {
 
 void WebServerManager::handleUpdateDevice() {
     handleCORS();
+    if (!checkAuth()) return;
 
     if (!server->hasArg("plain")) {
         sendJsonError(400, "No data received");
@@ -530,6 +587,8 @@ void WebServerManager::handleUpdateDevice() {
     if (doc.containsKey("somfy_rolling_code")) device.somfy.rollingCode = doc["somfy_rolling_code"];
     if (doc.containsKey("dooya_device_id")) device.dooyaBidir.deviceId = doc["dooya_device_id"];
     if (doc.containsKey("dooya_unit_code")) device.dooyaBidir.unitCode = doc["dooya_unit_code"];
+    if (doc.containsKey("aok_remote_id")) device.aok.remoteId = doc["aok_remote_id"];
+    if (doc.containsKey("aok_channel")) device.aok.channel = doc["aok_channel"];
 
     if (storage.updateDevice(id, &device)) {
         sendJsonResponse(200, "{\"success\":true,\"message\":\"Dispositivo actualizado\"}");
@@ -540,6 +599,7 @@ void WebServerManager::handleUpdateDevice() {
 
 void WebServerManager::handleDeleteDevice() {
     handleCORS();
+    if (!checkAuth()) return;
 
     String id = server->arg("id");
     if (id.length() == 0) {
@@ -579,6 +639,12 @@ void WebServerManager::handleTransmitSignal() {
 
     // Somfy RTS
     if (device.type == DEVICE_CURTAIN_SOMFY) {
+        // Verificar que tenga dirección configurada
+        if (device.somfy.address == 0) {
+            sendJsonError(400, "Direccion Somfy no configurada. Elimina y crea el dispositivo con una direccion valida.");
+            return;
+        }
+
         uint8_t cmd = SOMFY_CMD_MY;
         if (signalIndex == 0) cmd = SOMFY_CMD_UP;
         else if (signalIndex == 1) cmd = SOMFY_CMD_DOWN;
@@ -586,16 +652,26 @@ void WebServerManager::handleTransmitSignal() {
         else if (signalIndex == 3) cmd = SOMFY_CMD_PROG;
 
         somfyRTS.setRemote(&device.somfy);
-        somfyRTS.sendCommand(cmd);
-        device.somfy.rollingCode++;
-        storage.updateSomfyRollingCode(deviceId.c_str(), device.somfy.rollingCode);
+        bool success = somfyRTS.sendCommand(cmd);
 
-        sendJsonResponse(200, "{\"success\":true,\"message\":\"Comando Somfy enviado\"}");
+        if (success) {
+            device.somfy.rollingCode++;
+            storage.updateSomfyRollingCode(deviceId.c_str(), device.somfy.rollingCode);
+            sendJsonResponse(200, "{\"success\":true,\"message\":\"Comando Somfy enviado\"}");
+        } else {
+            sendJsonError(500, "Error al enviar comando Somfy");
+        }
         return;
     }
 
     // Dooya Bidir
     if (device.type == DEVICE_CURTAIN_DOOYA_BIDIR) {
+        // Verificar que tenga Device ID configurado
+        if (device.dooyaBidir.deviceId == 0) {
+            sendJsonError(400, "Device ID no configurado. Elimina y crea el dispositivo con un ID valido.");
+            return;
+        }
+
         uint8_t cmd = DOOYA_BIDIR_CMD_STOP;
         if (signalIndex == 0) cmd = DOOYA_BIDIR_CMD_UP;
         else if (signalIndex == 1) cmd = DOOYA_BIDIR_CMD_DOWN;
@@ -603,9 +679,40 @@ void WebServerManager::handleTransmitSignal() {
         else if (signalIndex == 3) cmd = DOOYA_BIDIR_CMD_PROG;
 
         dooyaBidir.setRemote(&device.dooyaBidir);
-        dooyaBidir.sendCommand(cmd);
+        bool success = dooyaBidir.sendCommand(cmd);
 
-        sendJsonResponse(200, "{\"success\":true,\"message\":\"Comando Dooya enviado\"}");
+        if (success) {
+            sendJsonResponse(200, "{\"success\":true,\"message\":\"Comando Dooya enviado\"}");
+        } else {
+            sendJsonError(500, "Error al enviar comando Dooya");
+        }
+        return;
+    }
+
+    // A-OK AC114 (protocolo específico)
+    if (device.type == DEVICE_CURTAIN_AOK) {
+        Serial.println("[Web] Enviando comando A-OK");
+        if (device.aok.remoteId == 0) {
+            sendJsonError(400, "Remote ID A-OK no configurado. Elimina y crea el dispositivo con un ID valido.");
+            return;
+        }
+
+        aokProtocol.setRemoteId(device.aok.remoteId);
+        aokProtocol.setChannel(device.aok.channel);
+
+        uint8_t cmd = AOK_CMD_STOP;
+        if (signalIndex == 0) cmd = AOK_CMD_UP;
+        else if (signalIndex == 1) cmd = AOK_CMD_DOWN;
+        else if (signalIndex == 2) cmd = AOK_CMD_STOP;
+        else if (signalIndex == 3) cmd = AOK_CMD_PROGRAM;
+
+        bool success = aokProtocol.sendCommand(cmd);
+
+        if (success) {
+            sendJsonResponse(200, "{\"success\":true,\"message\":\"Comando A-OK enviado\"}");
+        } else {
+            sendJsonError(500, "Error al enviar comando A-OK");
+        }
         return;
     }
 
@@ -615,16 +722,39 @@ void WebServerManager::handleTransmitSignal() {
         return;
     }
 
-    if (device.signals[signalIndex].length == 0) {
-        sendJsonError(404, "Signal not found");
+    // Verificar que la señal exista y sea válida
+    if (device.signals[signalIndex].length == 0 || !device.signals[signalIndex].valid) {
+        Serial.printf("[Web] Signal %d: length=%d, valid=%d\n",
+                      signalIndex, device.signals[signalIndex].length,
+                      device.signals[signalIndex].valid);
+        sendJsonError(404, "Senal no encontrada o invalida");
         return;
     }
+
+    // Verificar que CC1101 esté conectado
+    if (!rfModule.isConnected()) {
+        Serial.println("[Web] CC1101 no conectado, intentando reiniciar...");
+        rfModule.begin();
+        if (!rfModule.isConnected()) {
+            sendJsonError(500, "CC1101 no disponible");
+            return;
+        }
+    }
+
+    // Configurar frecuencia y modulación de la señal guardada
+    rfModule.setFrequency(device.signals[signalIndex].frequency);
+    rfModule.setModulation(device.signals[signalIndex].modulation);
 
     // Use signal's repeatCount, default to RF_REPEAT_TRANSMIT if not set
     int repeats = device.signals[signalIndex].repeatCount > 0 ?
                   device.signals[signalIndex].repeatCount : RF_REPEAT_TRANSMIT;
 
-    if (rfModule.transmitRaw(device.signals[signalIndex].data, device.signals[signalIndex].length, repeats)) {
+    Serial.printf("[Web] Transmitiendo señal %d: freq=%.2f, mod=%d, len=%d, repeats=%d\n",
+                  signalIndex, device.signals[signalIndex].frequency,
+                  device.signals[signalIndex].modulation,
+                  device.signals[signalIndex].length, repeats);
+
+    if (rfModule.transmitRaw(device.signals[signalIndex].data, device.signals[signalIndex].length, repeats, device.signals[signalIndex].inverted)) {
         if (onSignalTransmit) {
             onSignalTransmit(deviceId.c_str(), signalIndex);
         }
@@ -642,13 +772,23 @@ void WebServerManager::handleStartCapture() {
         frequency = sysConfig->default_frequency;
     }
 
+    int modulation = server->arg("modulation").toInt();
+    // Si no se especifica o es inválido, usar ASK/OOK (2)
+    if (modulation < 0 || modulation > 4) {
+        modulation = 2;
+    }
+
     rfModule.setFrequency(frequency);
+    rfModule.setModulation(modulation);
+
+    Serial.printf("[Web] Iniciando captura: freq=%.2f MHz, mod=%d\n", frequency, modulation);
 
     if (rfModule.startCapture()) {
         captureInProgress = true;
         StaticJsonDocument<128> doc;
         doc["success"] = true;
         doc["frequency"] = frequency;
+        doc["modulation"] = modulation;
         doc["message"] = "Captura iniciada";
         String response;
         serializeJson(doc, response);
@@ -677,6 +817,12 @@ void WebServerManager::handleGetCapture() {
 
     while (millis() - startTime < timeout) {
         if (rfModule.captureSignal(&signal, timeout - (millis() - startTime))) {
+            // Guardar en tempCapturedSignal para decode-aok
+            if (tempCapturedSignal) {
+                memcpy(tempCapturedSignal, &signal, sizeof(RFSignal));
+                Serial.printf("[Web] Señal guardada en tempCapturedSignal: %d bytes\n", signal.length);
+            }
+
             DynamicJsonDocument doc(2048);  // Use heap for large signal data
             doc["success"] = true;
             doc["valid"] = true;
@@ -926,6 +1072,42 @@ void WebServerManager::handleUpdateSignalRepeat() {
     }
 }
 
+void WebServerManager::handleUpdateSignalInvert() {
+    handleCORS();
+
+    if (!server->hasArg("plain")) {
+        sendJsonError(400, "No data received");
+        return;
+    }
+
+    String body = server->arg("plain");
+    StaticJsonDocument<256> doc;
+    DeserializationError error = deserializeJson(doc, body);
+
+    if (error) {
+        sendJsonError(400, "Invalid JSON");
+        return;
+    }
+
+    const char* deviceId = doc["deviceId"] | "";
+    int signalIndex = doc["signalIndex"] | -1;
+    bool inverted = doc["inverted"] | false;
+
+    if (strlen(deviceId) == 0 || signalIndex < 0 || signalIndex > 3) {
+        sendJsonError(400, "Invalid device ID or signal index");
+        return;
+    }
+
+    // Update inverted flag in storage
+    if (storage.updateSignalInverted(deviceId, signalIndex, inverted)) {
+        Serial.printf("[Web] Signal invert updated: device=%s, signal=%d, inverted=%s\n",
+                      deviceId, signalIndex, inverted ? "YES" : "NO");
+        sendJsonResponse(200, "{\"success\":true}");
+    } else {
+        sendJsonError(500, "Error updating inverted flag");
+    }
+}
+
 void WebServerManager::handleSetFrequency() {
     handleCORS();
 
@@ -961,6 +1143,201 @@ void WebServerManager::handleScanFrequency() {
     sendJsonResponse(200, response);
 }
 
+void WebServerManager::handleIdentifySignal() {
+    handleCORS();
+
+    Serial.println("[Web] Iniciando identificación de señal...");
+
+    // Lista completa de frecuencias comunes a escanear
+    float frequencies[] = {
+        300.00,   // Frecuencia baja
+        303.87,   // Garajes USA
+        310.00,   // Algunos controles
+        315.00,   // USA/Asia estándar
+        390.00,   // Algunos garajes
+        418.00,   // Alarmas
+        433.00,   // Europa base
+        433.42,   // Variante común
+        433.92,   // Europa/Latam estándar (más común)
+        434.00,   // Variante común
+        868.00,   // Europa alta
+        915.00    // USA ISM
+    };
+    int freqCount = 12;
+
+    // Modulaciones a probar (ASK/OOK primero porque es la más común)
+    int modulations[] = {2, 0, 1};  // ASK/OOK, 2-FSK, GFSK
+    const char* modNames[] = {"ASK/OOK", "2-FSK", "GFSK"};
+    int modCount = 3;
+
+    DynamicJsonDocument doc(2048);
+    doc["success"] = false;
+
+    float detectedFreq = 0;
+    int detectedMod = 2;
+    int maxRSSI = -120;
+    RFSignal signal;
+    bool signalCaptured = false;
+
+    // Fase 1: Escanear TODAS las frecuencias con ASK/OOK primero (más común)
+    Serial.println("[Web] Fase 1: Escaneando todas las frecuencias...");
+
+    for (int m = 0; m < modCount && detectedFreq == 0; m++) {
+        rfModule.setModulation(modulations[m]);
+        Serial.printf("[Web] Probando modulación: %s\n", modNames[m]);
+
+        for (int f = 0; f < freqCount; f++) {
+            rfModule.setFrequency(frequencies[f]);
+            ELECHOUSE_cc1101.SetRx();
+
+            Serial.printf("[Web] Escaneando %.2f MHz (%d/%d)...\n", frequencies[f], f + 1, freqCount);
+
+            // Escanear por 1 segundo en cada frecuencia
+            unsigned long scanStart = millis();
+            while (millis() - scanStart < 1000) {
+                int rssi = rfModule.getRSSI();
+                if (rssi > maxRSSI && rssi > -55) {
+                    maxRSSI = rssi;
+                    detectedFreq = frequencies[f];
+                    detectedMod = modulations[m];
+                    Serial.printf("[Web] *** SEÑAL DETECTADA: %.2f MHz, %s, RSSI: %d ***\n",
+                                  frequencies[f], modNames[m], rssi);
+                }
+                delay(15);
+            }
+        }
+    }
+
+    // Fase 2: Si encontramos señal, intentar capturarla
+    if (detectedFreq > 0) {
+        Serial.printf("[Web] Fase 2: Capturando en %.2f MHz, %s...\n",
+                      detectedFreq, modNames[detectedMod == 2 ? 0 : (detectedMod == 0 ? 1 : 2)]);
+
+        rfModule.setFrequency(detectedFreq);
+        rfModule.setModulation(detectedMod);
+
+        if (rfModule.captureSignal(&signal, 10000)) {
+            signalCaptured = true;
+            Serial.println("[Web] Señal capturada exitosamente");
+        }
+    }
+
+    // Construir respuesta
+    if (signalCaptured && signal.valid) {
+        doc["success"] = true;
+        doc["frequency"] = round(signal.frequency * 100) / 100.0;
+        doc["modulation"] = signal.modulation;
+        doc["rssi"] = maxRSSI;
+        doc["length"] = signal.length;
+
+        // Nombres de modulación
+        const char* modName = "Desconocida";
+        switch (signal.modulation) {
+            case 0: modName = "2-FSK"; break;
+            case 1: modName = "GFSK"; break;
+            case 2: modName = "ASK/OOK"; break;
+            case 3: modName = "4-FSK"; break;
+            case 4: modName = "MSK"; break;
+        }
+        doc["modulation_name"] = modName;
+
+        // Detectar protocolo
+        RFProtocol protocol = rfModule.detectProtocol(&signal);
+        doc["protocol"] = rfModule.getProtocolName(protocol);
+        doc["protocol_id"] = (int)protocol;
+
+        // Incluir análisis
+        String analysis = rfModule.analyzeSignal(&signal);
+        doc["analysis"] = analysis;
+
+        // Datos de la señal para poder usarla
+        String hexData = "";
+        hexData.reserve(signal.length * 2 + 1);
+        for (uint16_t i = 0; i < signal.length; i++) {
+            if (signal.data[i] < 16) hexData += "0";
+            hexData += String(signal.data[i], HEX);
+        }
+        doc["data"] = hexData;
+
+        // Recomendaciones
+        doc["recommendations"] = rfModule.getRecommendedSettings(&signal);
+
+        doc["message"] = "Señal identificada correctamente";
+    } else if (detectedFreq > 0) {
+        doc["success"] = false;
+        doc["frequency"] = detectedFreq;
+        doc["rssi"] = maxRSSI;
+        doc["message"] = "Se detectó actividad RF pero no se pudo capturar la señal. Intente mantener presionado el botón del control.";
+    } else {
+        doc["success"] = false;
+        doc["message"] = "No se detectó ninguna señal RF. Asegúrese de presionar el botón del control cerca del receptor.";
+    }
+
+    String response;
+    serializeJson(doc, response);
+    sendJsonResponse(200, response);
+}
+
+void WebServerManager::handleDecodeAOK() {
+    handleCORS();
+    if (!checkAuth()) return;
+
+    Serial.println("[Web] Decodificando señal A-OK...");
+    Serial.flush();
+
+    // Debug: mostrar estado de tempCapturedSignal
+    Serial.printf("[Web] tempCapturedSignal=%p\n", tempCapturedSignal);
+    if (tempCapturedSignal) {
+        Serial.printf("[Web] valid=%d, length=%d\n", tempCapturedSignal->valid, tempCapturedSignal->length);
+    }
+    Serial.flush();
+
+    // Check if we have a captured signal
+    if (!tempCapturedSignal || !tempCapturedSignal->valid || tempCapturedSignal->length < 20) {
+        Serial.println("[Web] ERROR: No hay señal válida en tempCapturedSignal");
+        sendJsonError(400, "No hay señal capturada. Primero capture una señal.");
+        return;
+    }
+
+    Serial.printf("[Web] >>> Llamando learnFromCapture: data=%p, len=%d <<<\n",
+                  tempCapturedSignal->data, tempCapturedSignal->length);
+    Serial.flush();
+
+    // Try to decode as A-OK
+    bool success = aokProtocol.learnFromCapture(tempCapturedSignal->data, tempCapturedSignal->length);
+
+    Serial.printf("[Web] >>> learnFromCapture retorno: %s <<<\n", success ? "true" : "false");
+    Serial.flush();
+
+    DynamicJsonDocument doc(512);
+
+    if (success) {
+        uint32_t extractedId = aokProtocol.getRemoteId();
+        uint8_t extractedChannel = aokProtocol.getChannel();
+
+        doc["success"] = true;
+        doc["protocol"] = "A-OK AC114";
+        doc["remote_id"] = extractedId;
+
+        // Format as hex string
+        char hexId[7];
+        snprintf(hexId, sizeof(hexId), "%06X", extractedId);
+        doc["remote_id_hex"] = hexId;
+
+        doc["channel"] = extractedChannel;
+        doc["message"] = "Señal A-OK decodificada correctamente!";
+
+        Serial.printf("[Web] A-OK decodificado: ID=0x%06X, Canal=%d\n", extractedId, extractedChannel);
+    } else {
+        doc["success"] = false;
+        doc["message"] = "No se pudo decodificar como señal A-OK. Puede ser otro protocolo.";
+    }
+
+    String response;
+    serializeJson(doc, response);
+    sendJsonResponse(200, response);
+}
+
 void WebServerManager::handleBackup() {
     handleCORS();
 
@@ -971,6 +1348,7 @@ void WebServerManager::handleBackup() {
 
 void WebServerManager::handleRestore() {
     handleCORS();
+    if (!checkAuth()) return;
 
     if (!server->hasArg("plain")) {
         sendJsonError(400, "No data received");
@@ -1039,6 +1417,7 @@ void WebServerManager::handleWiFiScan() {
 
 void WebServerManager::handleWiFiConnect() {
     handleCORS();
+    if (!checkAuth()) return;
 
     if (!server->hasArg("plain")) {
         sendJsonError(400, "No data received");
@@ -1087,6 +1466,8 @@ void WebServerManager::handleMqttRediscover() {
 
 void WebServerManager::handleReboot() {
     handleCORS();
+    if (!checkAuth()) return;
+
     sendJsonResponse(200, "{\"success\":true,\"message\":\"Reiniciando...\"}");
     delay(1000);
     ESP.restart();
@@ -1094,9 +1475,12 @@ void WebServerManager::handleReboot() {
 
 void WebServerManager::handleFactoryReset() {
     handleCORS();
+    if (!checkAuth()) return;
 
-    storage.format();
-    sendJsonResponse(200, "{\"success\":true,\"message\":\"Restauracion de fabrica. Reiniciando...\"}");
+    // Solo borrar datos de usuario (config.json y devices.json)
+    // NO formatear todo el sistema de archivos para preservar archivos web
+    storage.clearUserData();
+    sendJsonResponse(200, "{\"success\":true,\"message\":\"Configuracion borrada. Reiniciando...\"}");
     delay(1000);
     ESP.restart();
 }

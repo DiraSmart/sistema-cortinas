@@ -72,8 +72,11 @@ private:
     void handleDeleteSignal();
     void handleTestSignal();
     void handleUpdateSignalRepeat();
+    void handleUpdateSignalInvert();
     void handleSetFrequency();
     void handleScanFrequency();
+    void handleIdentifySignal();
+    void handleDecodeAOK();
     void handleBackup();
     void handleRestore();
     void handleWiFiScan();
@@ -87,6 +90,7 @@ private:
     void sendJsonResponse(int code, const String& json);
     void sendJsonError(int code, const String& message);
     void handleCORS();
+    bool checkAuth();  // Verificar autenticación
 };
 
 // Instancia global

@@ -3,6 +3,7 @@
 #include "CC1101_RF.h"
 #include "SomfyRTS.h"
 #include "DooyaBidir.h"
+#include "AOK_Protocol.h"
 
 MQTTClientManager* MQTTClientManager::instance = nullptr;
 MQTTClientManager mqttClient;
@@ -291,6 +292,30 @@ void MQTTClientManager::processDeviceCommand(const char* deviceId, const char* c
         return;
     }
 
+    // Manejar dispositivos A-OK AC114
+    if (device.type == DEVICE_CURTAIN_AOK) {
+        Serial.printf("[MQTT] Comando A-OK para %s\n", device.name);
+
+        aokProtocol.setRemoteId(device.aok.remoteId);
+        aokProtocol.setChannel(device.aok.channel);
+
+        bool success = false;
+        if (cmd == "open" || cmd == "up") {
+            success = aokProtocol.sendUp();
+        } else if (cmd == "close" || cmd == "down") {
+            success = aokProtocol.sendDown();
+        } else if (cmd == "stop") {
+            success = aokProtocol.sendStop();
+        } else if (cmd == "prog") {
+            success = aokProtocol.sendProgram();
+        }
+
+        if (success) {
+            publishDeviceState(deviceId, command);
+        }
+        return;
+    }
+
     // Interpretar comando según tipo de dispositivo funcional
     int signalIndex = -1;
 
@@ -470,6 +495,7 @@ void MQTTClientManager::publishDiscovery() {
             case DEVICE_CURTAIN:
             case DEVICE_CURTAIN_SOMFY:
             case DEVICE_CURTAIN_DOOYA_BIDIR:
+            case DEVICE_CURTAIN_AOK:
                 publishCoverDiscovery(&device);
                 break;
 

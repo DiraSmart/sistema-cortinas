@@ -12,6 +12,9 @@ CC1101_RF::CC1101_RF() {
     captureIndex = 0;
     lastPulse = 0;
     captureComplete = false;
+    preBufferIndex = 0;
+    preBufferFull = false;
+    preCapturing = false;
     instance = this;
 }
 
@@ -51,7 +54,17 @@ bool CC1101_RF::begin() {
 }
 
 bool CC1101_RF::isConnected() {
-    return connected;  // Solo true si begin() fue exitoso
+    if (!connected) return false;
+
+    // Verificar que el módulo realmente responda (evitar "invalid header: 0xffffff")
+    // Esto detecta si el módulo se desconectó después de inicializar
+    if (!ELECHOUSE_cc1101.getCC1101()) {
+        Serial.println("[RF] WARNING: CC1101 no responde, marcando como desconectado");
+        connected = false;
+        return false;
+    }
+
+    return true;
 }
 
 void CC1101_RF::setFrequency(float freq) {
@@ -115,6 +128,32 @@ void IRAM_ATTR CC1101_RF::handleInterrupt() {
     }
 }
 
+void IRAM_ATTR CC1101_RF::handlePreCaptureInterrupt() {
+    if (instance) {
+        instance->onPreCaptureInterrupt();
+    }
+}
+
+// Pre-captura: almacena pulsos en buffer circular ANTES de detectar señal fuerte
+void CC1101_RF::onPreCaptureInterrupt() {
+    if (!preCapturing) return;
+
+    unsigned long now = micros();
+    unsigned long duration = now - lastPulse;
+    lastPulse = now;
+
+    // Filtrar pulsos muy cortos o muy largos
+    if (duration < RF_MIN_PULSE_WIDTH || duration > RF_MAX_PULSE_WIDTH) return;
+
+    // Almacenar en buffer circular
+    uint16_t idx = preBufferIndex;
+    preBuffer[idx] = (duration >> 8) & 0xFF;
+    preBuffer[idx + 1] = duration & 0xFF;
+
+    preBufferIndex = (idx + 2) % PRE_BUFFER_SIZE;
+    if (preBufferIndex == 0) preBufferFull = true;
+}
+
 void CC1101_RF::onInterrupt() {
     if (!capturing || captureComplete) return;
 
@@ -155,50 +194,62 @@ bool CC1101_RF::captureSignal(RFSignal* signal, unsigned long timeout) {
     unsigned long startTime = millis();
     unsigned long lastPrint = 0;
     bool signalDetected = false;
-    int stableCount = 0;
-    const int RSSI_THRESHOLD = -50;     // Señal fuerte requerida
-    const int STABLE_READINGS = 3;      // Lecturas consecutivas necesarias
+    const int RSSI_THRESHOLD = -60;     // Umbral más sensible para detectar preámbulo
+    const int RSSI_STRONG = -50;        // Señal principal fuerte
 
     // Configurar para recepción
     configureReceiver();
     ELECHOUSE_cc1101.SetRx();
 
-    Serial.printf("[RF] Esperando señal fuerte (RSSI > %d)...\n", RSSI_THRESHOLD);
+    // === FASE 1: Iniciar PRE-CAPTURA inmediatamente ===
+    // Esto captura todo incluyendo el preámbulo/wake-up
+    preBufferIndex = 0;
+    preBufferFull = false;
+    preCapturing = true;
+    memset((void*)preBuffer, 0, PRE_BUFFER_SIZE);
+    pinMode(CC1101_GDO0, INPUT);
+    attachInterrupt(digitalPinToInterrupt(CC1101_GDO0), handlePreCaptureInterrupt, CHANGE);
+    lastPulse = micros();
+
+    Serial.printf("[RF] Pre-captura iniciada (capturando preámbulo)...\n");
+    Serial.printf("[RF] Esperando señal (RSSI > %d)...\n", RSSI_THRESHOLD);
     Serial.println("[RF] Presione el control cerca del receptor");
 
-    // Fase 1: Esperar señal fuerte y estable antes de capturar
+    // === FASE 2: Esperar detección de señal ===
     while ((millis() - startTime) < timeout) {
         int rssi = getRSSI();
 
         // Imprimir RSSI cada 500ms para debug
         if (millis() - lastPrint > 500) {
-            Serial.printf("[RF] RSSI: %d dBm\n", rssi);
+            Serial.printf("[RF] RSSI: %d dBm, pre-buffer: %d bytes\n", rssi, preBufferIndex);
             lastPrint = millis();
         }
 
-        if (rssi > RSSI_THRESHOLD) {
-            stableCount++;
-            if (stableCount >= STABLE_READINGS && !signalDetected) {
-                signalDetected = true;
-                Serial.printf("[RF] Señal estable detectada! RSSI: %d - Capturando...\n", rssi);
+        // Detectar señal (umbral más sensible)
+        if (rssi > RSSI_THRESHOLD && !signalDetected) {
+            signalDetected = true;
+            Serial.printf("[RF] Señal detectada! RSSI: %d - Continuando captura...\n", rssi);
 
-                // Ahora sí iniciar captura
-                captureIndex = 0;
-                captureComplete = false;
-                memset((void*)captureBuffer, 0, RF_MAX_SIGNAL_LENGTH);
-                pinMode(CC1101_GDO0, INPUT);
-                attachInterrupt(digitalPinToInterrupt(CC1101_GDO0), handleInterrupt, CHANGE);
-                capturing = true;
-                lastPulse = micros();
-            }
-        } else {
-            stableCount = 0;  // Reset si la señal baja
+            // Detener pre-captura y cambiar a captura principal
+            preCapturing = false;
+            detachInterrupt(digitalPinToInterrupt(CC1101_GDO0));
+
+            // === Iniciar captura limpia (sin pre-buffer de ruido) ===
+            captureIndex = 0;
+            captureComplete = false;
+            memset((void*)captureBuffer, 0, RF_MAX_SIGNAL_LENGTH);
+            Serial.println("[RF] Buffer limpio, capturando señal...");
+
+            // Continuar captura principal
+            attachInterrupt(digitalPinToInterrupt(CC1101_GDO0), handleInterrupt, CHANGE);
+            capturing = true;
+            lastPulse = micros();
         }
 
         // Si ya estamos capturando y tenemos suficientes pulsos, terminar
         if (capturing && captureIndex >= RF_MIN_PULSES * 2) {
-            // Esperar un poco más para capturar la señal completa
-            delay(100);
+            // Esperar más tiempo para capturar señales largas (A-OK necesita ~260 bytes)
+            delay(500);
             break;
         }
 
@@ -216,6 +267,10 @@ bool CC1101_RF::captureSignal(RFSignal* signal, unsigned long timeout) {
         capturing = false;
         detachInterrupt(digitalPinToInterrupt(CC1101_GDO0));
     }
+    if (preCapturing) {
+        preCapturing = false;
+        detachInterrupt(digitalPinToInterrupt(CC1101_GDO0));
+    }
     ELECHOUSE_cc1101.setSidle();
 
     // Verificar resultado
@@ -230,7 +285,7 @@ bool CC1101_RF::captureSignal(RFSignal* signal, unsigned long timeout) {
         signal->timestamp = millis();
         signal->valid = true;
 
-        Serial.printf("[RF] Señal capturada: %d bytes\n", signal->length);
+        Serial.printf("[RF] Señal capturada: %d bytes (con preámbulo)\n", signal->length);
         return true;
     }
 
@@ -243,18 +298,31 @@ bool CC1101_RF::captureSignal(RFSignal* signal, unsigned long timeout) {
 bool CC1101_RF::transmitSignal(const RFSignal* signal, int repeats) {
     if (!connected || !signal->valid) return false;
 
-    return transmitRaw(signal->data, signal->length, repeats);
+    return transmitRaw(signal->data, signal->length, repeats, signal->inverted);
 }
 
-bool CC1101_RF::transmitRaw(const uint8_t* data, uint16_t length, int repeats) {
+bool CC1101_RF::transmitRaw(const uint8_t* data, uint16_t length, int repeats, bool inverted) {
     if (!connected || length == 0) {
         Serial.printf("[RF] TX FAILED: connected=%d, length=%d\n", connected, length);
         return false;
     }
 
+    // Verificar que el módulo responda antes de transmitir
+    if (!ELECHOUSE_cc1101.getCC1101()) {
+        Serial.println("[RF] TX FAILED: CC1101 no responde, intentando reiniciar...");
+        connected = false;
+        // Intentar reiniciar el módulo
+        if (!begin()) {
+            Serial.println("[RF] No se pudo reiniciar CC1101");
+            return false;
+        }
+        Serial.println("[RF] CC1101 reiniciado, continuando transmisión...");
+    }
+
     int pulseCount = length / 2;
     Serial.printf("[RF] ========== TRANSMIT START ==========\n");
-    Serial.printf("[RF] TX: %d pulses, %d repeats, freq=%.2f MHz\n", pulseCount, repeats, currentFrequency);
+    Serial.printf("[RF] TX: %d pulses, %d repeats, freq=%.2f MHz, inverted=%s\n",
+                  pulseCount, repeats, currentFrequency, inverted ? "YES" : "NO");
 
     // Debug: show first pulse durations
     Serial.print("[RF] Pulses (us): ");
@@ -291,14 +359,12 @@ bool CC1101_RF::transmitRaw(const uint8_t* data, uint16_t length, int repeats) {
     ELECHOUSE_cc1101.SetTx();  // Use library function
     delay(5);  // Give time to enter TX mode
 
-    Serial.printf("[RF] Transmitting on GDO2 pin %d...\n", CC1101_GDO2);
+    // Polaridad inicial: normalmente empieza HIGH, si está invertido empieza LOW
+    bool startHigh = !inverted;
+    Serial.printf("[RF] Starting with: %s\n", startHigh ? "HIGH (normal)" : "LOW (inverted)");
 
-    // Step 5: Transmit the signal - try both polarities
-    // First half repeats: normal polarity (start HIGH)
-    // Second half repeats: inverted polarity (start LOW)
+    // Step 5: Transmit the signal
     for (int rep = 0; rep < repeats; rep++) {
-        // Alternate polarity each repeat
-        bool startHigh = (rep % 2) == 0;
 
         // Disable interrupts for precise timing
         portDISABLE_INTERRUPTS();
@@ -327,14 +393,13 @@ bool CC1101_RF::transmitRaw(const uint8_t* data, uint16_t length, int repeats) {
 
         portENABLE_INTERRUPTS();
 
-        // Log each repeat
-        Serial.printf("[RF] Rep %d/%d (%s) complete\n", rep + 1, repeats, startHigh ? "normal" : "inverted");
-
-        // Gap between repetitions
+        // Gap mínimo entre repeticiones (solo para estabilidad del transmisor)
         if (rep < repeats - 1) {
-            delay(30);
+            delayMicroseconds(500);  // 0.5ms - suficiente para estabilidad sin separar comandos
         }
     }
+
+    Serial.printf("[RF] TX: %d repeticiones completadas\n", repeats);
 
     // Step 6: Return to idle
     digitalWrite(CC1101_GDO2, LOW);

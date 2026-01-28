@@ -1,4 +1,5 @@
 #include "Storage.h"
+#include <WiFi.h>
 
 StorageManager storage;
 
@@ -33,6 +34,35 @@ bool StorageManager::format() {
     return LittleFS.format();
 }
 
+bool StorageManager::clearUserData() {
+    Serial.println("[Storage] Borrando solo datos de usuario...");
+
+    bool success = true;
+
+    // Borrar archivo de configuración
+    if (fileExists(CONFIG_FILE)) {
+        if (LittleFS.remove(CONFIG_FILE)) {
+            Serial.println("[Storage] config.json eliminado");
+        } else {
+            Serial.println("[Storage] Error al eliminar config.json");
+            success = false;
+        }
+    }
+
+    // Borrar archivo de dispositivos
+    if (fileExists(DEVICES_FILE)) {
+        if (LittleFS.remove(DEVICES_FILE)) {
+            Serial.println("[Storage] devices.json eliminado");
+        } else {
+            Serial.println("[Storage] Error al eliminar devices.json");
+            success = false;
+        }
+    }
+
+    Serial.println("[Storage] Datos de usuario borrados (archivos web preservados)");
+    return success;
+}
+
 void StorageManager::setDefaultConfig(SystemConfig* config) {
     memset(config, 0, sizeof(SystemConfig));
 
@@ -45,7 +75,14 @@ void StorageManager::setDefaultConfig(SystemConfig* config) {
     config->mqtt_port = MQTT_PORT;
     strcpy(config->mqtt_user, "");
     strcpy(config->mqtt_password, "");
-    strcpy(config->mqtt_client_id, DEFAULT_DEVICE_NAME);
+
+    // Generar mqtt_client_id único usando los últimos 3 bytes de la MAC
+    uint8_t mac[6];
+    WiFi.macAddress(mac);
+    char uniqueClientId[32];
+    snprintf(uniqueClientId, sizeof(uniqueClientId), "RF_%02X%02X%02X", mac[3], mac[4], mac[5]);
+    strcpy(config->mqtt_client_id, uniqueClientId);
+
     config->mqtt_enabled = false;
     config->mqtt_discovery = true;
 
@@ -57,7 +94,8 @@ void StorageManager::setDefaultConfig(SystemConfig* config) {
     config->default_frequency = RF_DEFAULT_FREQUENCY;
     config->default_modulation = 2; // ASK/OOK
 
-    strcpy(config->device_name, DEFAULT_DEVICE_NAME);
+    // device_name también único con la MAC
+    strcpy(config->device_name, uniqueClientId);
     config->auto_detect_enabled = true;
 }
 
@@ -89,6 +127,18 @@ bool StorageManager::loadConfig(SystemConfig* config) {
 
     JsonObject obj = doc.as<JsonObject>();
     jsonToConfig(obj, config);
+
+    // Migración: si mqtt_client_id es el valor viejo genérico, actualizar con MAC única
+    if (strcmp(config->mqtt_client_id, "RF_Controller") == 0) {
+        uint8_t mac[6];
+        WiFi.macAddress(mac);
+        char uniqueClientId[32];
+        snprintf(uniqueClientId, sizeof(uniqueClientId), "RF_%02X%02X%02X", mac[3], mac[4], mac[5]);
+        strcpy(config->mqtt_client_id, uniqueClientId);
+        strcpy(config->device_name, uniqueClientId);
+        saveConfig(config);  // Guardar la migración
+        Serial.printf("[Storage] Migración: mqtt_client_id actualizado a %s\n", uniqueClientId);
+    }
 
     Serial.println("[Storage] Configuración cargada");
     return true;
@@ -420,6 +470,23 @@ bool StorageManager::updateSignalRepeatCount(const char* deviceId, uint8_t signa
     return updateDevice(deviceId, &device);
 }
 
+bool StorageManager::updateSignalInverted(const char* deviceId, uint8_t signalIndex, bool inverted) {
+    if (signalIndex >= 4) return false;
+
+    SavedDevice device;
+    if (!getDevice(deviceId, &device)) return false;
+
+    if (!device.signals[signalIndex].valid) {
+        Serial.println("[Storage] Signal not valid, cannot update inverted flag");
+        return false;
+    }
+
+    device.signals[signalIndex].inverted = inverted;
+    Serial.printf("[Storage] Updated signal %d inverted to %s\n", signalIndex, inverted ? "YES" : "NO");
+
+    return updateDevice(deviceId, &device);
+}
+
 bool StorageManager::updateSomfyRollingCode(const char* deviceId, uint16_t newRollingCode) {
     SavedDevice device;
     if (!getDevice(deviceId, &device)) return false;
@@ -585,6 +652,7 @@ void StorageManager::signalToJson(JsonObject& obj, const RFSignal* signal) {
     obj["timestamp"] = signal->timestamp;
     obj["valid"] = signal->valid;
     obj["repeatCount"] = signal->repeatCount > 0 ? signal->repeatCount : RF_REPEAT_TRANSMIT;
+    obj["inverted"] = signal->inverted;
 }
 
 void StorageManager::jsonToSignal(JsonObject& obj, RFSignal* signal) {
@@ -606,6 +674,7 @@ void StorageManager::jsonToSignal(JsonObject& obj, RFSignal* signal) {
     signal->timestamp = obj["timestamp"] | 0;
     signal->valid = obj["valid"] | false;
     signal->repeatCount = obj["repeatCount"] | RF_REPEAT_TRANSMIT;
+    signal->inverted = obj["inverted"] | false;
 }
 
 void StorageManager::deviceToJson(JsonObject& obj, const SavedDevice* device) {
@@ -643,6 +712,13 @@ void StorageManager::deviceToJson(JsonObject& obj, const SavedDevice* device) {
         JsonObject dooyaObj = obj.createNestedObject("dooyaBidir");
         dooyaObj["deviceId"] = device->dooyaBidir.deviceId;
         dooyaObj["unitCode"] = device->dooyaBidir.unitCode;
+    }
+
+    // Datos A-OK AC114
+    if (device->type == DEVICE_CURTAIN_AOK) {
+        JsonObject aokObj = obj.createNestedObject("aok");
+        aokObj["remoteId"] = device->aok.remoteId;
+        aokObj["channel"] = device->aok.channel;
     }
 }
 
@@ -687,6 +763,13 @@ void StorageManager::jsonToDevice(JsonObject& obj, SavedDevice* device) {
         JsonObject dooyaObj = obj["dooyaBidir"];
         device->dooyaBidir.deviceId = dooyaObj["deviceId"] | 0;
         device->dooyaBidir.unitCode = dooyaObj["unitCode"] | 0;
+    }
+
+    // Datos A-OK AC114
+    if (obj.containsKey("aok")) {
+        JsonObject aokObj = obj["aok"];
+        device->aok.remoteId = aokObj["remoteId"] | 0;
+        device->aok.channel = aokObj["channel"] | 1;
     }
 }
 
@@ -751,6 +834,10 @@ void StorageManager::jsonToConfig(JsonObject& obj, SystemConfig* config) {
 
     // RF
     config->default_frequency = obj["default_frequency"] | RF_DEFAULT_FREQUENCY;
+    // Validar frecuencia - si es inválida (< 100 MHz), usar default
+    if (config->default_frequency < 100.0) {
+        config->default_frequency = RF_DEFAULT_FREQUENCY;
+    }
     config->default_modulation = obj["default_modulation"] | 2;
 
     // Sistema

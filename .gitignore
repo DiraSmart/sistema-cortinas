@@ -48,7 +48,7 @@ desktop.ini
 *.bak
 *.backup
 
-# Node modules (if using for demo)
+# Node modules
 node_modules/
 
 # Environment files with secrets

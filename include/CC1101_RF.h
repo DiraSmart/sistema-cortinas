@@ -27,7 +27,7 @@ public:
 
     // Transmisión de señales
     bool transmitSignal(const RFSignal* signal, int repeats = RF_REPEAT_TRANSMIT);
-    bool transmitRaw(const uint8_t* data, uint16_t length, int repeats = RF_REPEAT_TRANSMIT);
+    bool transmitRaw(const uint8_t* data, uint16_t length, int repeats = RF_REPEAT_TRANSMIT, bool inverted = false);
 
     // Detección automática de frecuencia
     float scanForSignal(float* frequencies, int count, unsigned long timeout = 3000);
@@ -60,6 +60,13 @@ private:
     volatile unsigned long lastPulse;
     volatile bool captureComplete;
 
+    // Pre-buffer circular para capturar preámbulo/wake-up
+    static const uint16_t PRE_BUFFER_SIZE = 200;  // 100 pulsos de preámbulo max
+    volatile uint8_t preBuffer[200];
+    volatile uint16_t preBufferIndex;
+    volatile bool preBufferFull;
+    volatile bool preCapturing;  // Captura continua antes de señal fuerte
+
     // Métodos internos
     void configureReceiver();
     void configureTransmitter();
@@ -70,6 +77,8 @@ private:
     static CC1101_RF* instance;
     static void IRAM_ATTR handleInterrupt();
     void onInterrupt();
+    void onPreCaptureInterrupt();  // Para captura continua de preámbulo
+    static void IRAM_ATTR handlePreCaptureInterrupt();
 };
 
 // Instancia global

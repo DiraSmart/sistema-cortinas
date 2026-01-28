@@ -28,6 +28,10 @@
 // Access Point (modo fallback)
 #define AP_SSID         "RF_Controller"
 #define AP_PASSWORD     "12345678"
+
+// Autenticación Web
+#define WEB_AUTH_USER       "admin"
+#define WEB_AUTH_PASSWORD   "dirasmart1"
 #define AP_IP           IPAddress(192, 168, 4, 1)
 #define AP_GATEWAY      IPAddress(192, 168, 4, 1)
 #define AP_SUBNET       IPAddress(255, 255, 255, 0)
@@ -46,7 +50,7 @@
 #define RF_DEFAULT_FREQUENCY    433.92  // MHz
 #define RF_CAPTURE_TIMEOUT      10000   // ms
 #define RF_MAX_SIGNAL_LENGTH    512     // bytes
-#define RF_REPEAT_TRANSMIT      5       // repeticiones
+#define RF_REPEAT_TRANSMIT      6      // repeticiones (aumentado para mejor confiabilidad)
 
 // Frecuencias predefinidas comunes
 const float RF_FREQUENCIES[] = {
@@ -78,6 +82,7 @@ enum DeviceType {
     DEVICE_DIMMER = 7,          // Dimmers (4 señales: on, off, +, -)
     DEVICE_CURTAIN_SOMFY = 10,  // Cortinas Somfy RTS (rolling code)
     DEVICE_CURTAIN_DOOYA_BIDIR = 11, // Cortinas Dooya DDxxxx bidireccional (FSK)
+    DEVICE_CURTAIN_AOK = 12,    // Cortinas A-OK AC114 (protocolo específico)
     DEVICE_OTHER = 99           // Otros (señales personalizadas)
 };
 
@@ -96,7 +101,8 @@ enum RFProtocol {
     PROTOCOL_CAME = 8,          // Came
     PROTOCOL_VERTILUX = 9,      // Vertilux/VTI
     PROTOCOL_SOMFY_RTS = 10,    // Somfy RTS (rolling code)
-    PROTOCOL_DOOYA_BIDIR = 11   // Dooya DDxxxx bidireccional (FSK encriptado)
+    PROTOCOL_DOOYA_BIDIR = 11,  // Dooya DDxxxx bidireccional (FSK encriptado)
+    PROTOCOL_AOK = 12           // A-OK AC114 (cortinas motorizadas)
 };
 
 // ============================================
@@ -197,6 +203,7 @@ struct RFSignal {
     unsigned long timestamp;
     bool valid;
     uint8_t repeatCount;    // Number of times to repeat transmission (1-20, default 5)
+    bool inverted;          // If true, start transmission with LOW instead of HIGH
 };
 
 // ============================================
@@ -219,6 +226,15 @@ struct DooyaBidirRemote {
 };
 
 // ============================================
+// ESTRUCTURA A-OK AC114
+// Remote ID y canal para controles A-OK
+// ============================================
+struct AOKRemote {
+    uint32_t remoteId;      // ID de 24 bits (único por control)
+    uint8_t channel;        // Canal 1-16 (0 = todos)
+};
+
+// ============================================
 // ESTRUCTURA DE DISPOSITIVO GUARDADO
 // ============================================
 struct SavedDevice {
@@ -238,6 +254,9 @@ struct SavedDevice {
 
     // Dooya Bidireccional (solo usado si type == DEVICE_CURTAIN_DOOYA_BIDIR)
     DooyaBidirRemote dooyaBidir; // ID y unit code
+
+    // A-OK AC114 (solo usado si type == DEVICE_CURTAIN_AOK)
+    AOKRemote aok;          // Remote ID y canal
 };
 
 // ============================================

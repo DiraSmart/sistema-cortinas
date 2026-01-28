@@ -13,6 +13,7 @@ public:
     // Inicialización
     bool begin();
     bool format();
+    bool clearUserData();  // Solo borra config y dispositivos, NO archivos web
 
     // Configuración del sistema
     bool loadConfig(SystemConfig* config);
@@ -34,6 +35,7 @@ public:
                             const RFSignal* signal, const char* signalName);
     bool deleteSignalFromDevice(const char* deviceId, uint8_t signalIndex);
     bool updateSignalRepeatCount(const char* deviceId, uint8_t signalIndex, uint8_t repeatCount);
+    bool updateSignalInverted(const char* deviceId, uint8_t signalIndex, bool inverted);
 
     // Somfy RTS
     bool updateSomfyRollingCode(const char* deviceId, uint16_t newRollingCode);

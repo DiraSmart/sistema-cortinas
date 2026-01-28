@@ -13,6 +13,7 @@
 #include "CC1101_RF.h"
 #include "SomfyRTS.h"
 #include "DooyaBidir.h"
+#include "AOK_Protocol.h"
 #include "WebServerManager.h"
 #include "MQTTClient.h"
 #include "TimeManager.h"
@@ -28,6 +29,27 @@ unsigned long lastStatusPrint = 0;
 void initSystem();
 void printStatus();
 void handleRFCommand(const char* deviceId, const char* command);
+void WiFiEvent(WiFiEvent_t event);
+
+// Callback para eventos WiFi
+void WiFiEvent(WiFiEvent_t event) {
+    switch (event) {
+        case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+            Serial.println("[WiFi] Conectado al AP");
+            break;
+        case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+            Serial.printf("[WiFi] IP obtenida: %s\n", WiFi.localIP().toString().c_str());
+            break;
+        case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+            Serial.println("[WiFi] Desconectado - reconectando...");
+            if (systemConfig.wifi_configured && strlen(systemConfig.wifi_ssid) > 0) {
+                WiFi.reconnect();
+            }
+            break;
+        default:
+            break;
+    }
+}
 
 void setup() {
     Serial.begin(115200);
@@ -65,6 +87,16 @@ void initSystem() {
     // 1. WiFi AP+STA (modo mixto para permitir escaneo de redes)
     Serial.println("[1/6] Configurando WiFi...");
     Serial.flush();
+
+    // Registrar callback de eventos WiFi para reconexión automática
+    WiFi.onEvent(WiFiEvent);
+
+    // Habilitar auto-reconexión nativa del ESP32
+    WiFi.setAutoReconnect(true);
+
+    // Guardar credenciales en flash del ESP32 (doble respaldo)
+    WiFi.persistent(true);
+
     WiFi.mode(WIFI_AP_STA);
     WiFi.softAP(AP_SSID, AP_PASSWORD);
     Serial.println("[OK] WiFi AP iniciado (modo mixto)");
@@ -87,6 +119,8 @@ void initSystem() {
     // Intentar WiFi cliente si está configurado (manteniendo AP activo)
     if (systemConfig.wifi_configured && strlen(systemConfig.wifi_ssid) > 0) {
         Serial.printf("[INFO] Conectando a %s...\n", systemConfig.wifi_ssid);
+        // Configurar hostname antes de conectar
+        WiFi.setHostname(systemConfig.device_name);
         // Ya estamos en WIFI_AP_STA, solo iniciamos conexión
         WiFi.begin(systemConfig.wifi_ssid, systemConfig.wifi_password);
 
@@ -120,6 +154,7 @@ void initSystem() {
             Serial.println("[OK] CC1101 inicializado");
             somfyRTS.begin(CC1101_GDO0);
             dooyaBidir.begin();
+            aokProtocol.begin();
         }
     } else {
         Serial.println("[INFO] CC1101 desactivado hasta conectar WiFi (evita interferencia)");
@@ -234,6 +269,18 @@ void handleRFCommand(const char* deviceId, const char* command) {
         else if (cmd == "close" || cmd == "down") dooyaBidir.sendDown();
         else if (cmd == "stop") dooyaBidir.sendStop();
         else if (cmd == "prog") dooyaBidir.sendProg();
+        return;
+    }
+
+    // A-OK AC114
+    if (device.type == DEVICE_CURTAIN_AOK) {
+        aokProtocol.setRemoteId(device.aok.remoteId);
+        aokProtocol.setChannel(device.aok.channel);
+
+        if (cmd == "open" || cmd == "up") aokProtocol.sendUp();
+        else if (cmd == "close" || cmd == "down") aokProtocol.sendDown();
+        else if (cmd == "stop") aokProtocol.sendStop();
+        else if (cmd == "prog") aokProtocol.sendProgram();
         return;
     }
 

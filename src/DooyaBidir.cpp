@@ -144,36 +144,91 @@ bool DooyaBidirectional::transmitFrame() {
 }
 
 void DooyaBidirectional::configureFSK() {
-    // Configurar CC1101 para modulación FSK
-    // Esto requiere cambiar varios registros del CC1101
+    // Configurar CC1101 para modulación 2-FSK (Dooya Bidireccional)
+    // Referencia: CC1101 Datasheet (SWRS061I)
 
-    // Frecuencia: 433.92 MHz
+    Serial.println("[DooyaBidir] Configurando 2-FSK para Dooya...");
+
+    // 1. Ir a estado IDLE antes de configurar
+    ELECHOUSE_cc1101.setSidle();
+    delay(1);
+
+    // 2. Frecuencia: 433.92 MHz
     ELECHOUSE_cc1101.setMHZ(DOOYA_BIDIR_FREQUENCY);
 
-    // Cambiar modulación a 2-FSK (MDMCFG2)
-    // Nota: La librería ELECHOUSE puede no tener método directo para esto
-    // Necesitamos escribir directamente al registro
+    // 3. DEVIATN (0x15) - Desviación de frecuencia ~25 kHz
+    // Fórmula: Deviation = (f_xosc / 2^17) * (8 + DEVIATION_M) * 2^DEVIATION_E
+    // Con crystal 26 MHz, DEVIATION_E=3, DEVIATION_M=7: ~23.8 kHz
+    // Registro: 0x37 = 0011 0111 (E=3, M=7)
+    ELECHOUSE_cc1101.SpiWriteReg(0x15, 0x37);
 
-    // MDMCFG2: Configuración de modulación
-    // Bits 6:4 = MOD_FORMAT: 000 = 2-FSK
-    // Por defecto está en ASK/OOK (011)
+    // 4. MDMCFG4 (0x10) - Channel BW y Data Rate Exponent
+    // Bits 7:4 = CHANBW (channel bandwidth) - usar valor medio
+    // Bits 3:0 = DRATE_E (data rate exponent) = 7 para ~4800 baud
+    // Valor: 0xC7 = 1100 0111 (BW~100kHz, DRATE_E=7)
+    ELECHOUSE_cc1101.SpiWriteReg(0x10, 0xC7);
 
-    // Configurar data rate (~4800 baud)
-    // MDMCFG4 y MDMCFG3 controlan el data rate
+    // 5. MDMCFG3 (0x11) - Data Rate Mantissa
+    // DRATE_M = 131 (0x83) para ~4797 baud
+    // Fórmula: DRATE = (f_xosc/2^28) * (256+DRATE_M) * 2^DRATE_E
+    ELECHOUSE_cc1101.SpiWriteReg(0x11, 0x83);
 
-    // Configurar desviación FSK (~25 kHz)
-    // DEVIATN register
+    // 6. MDMCFG2 (0x12) - Formato de modulación
+    // Bits 6:4 = MOD_FORMAT: 000 = 2-FSK (no ASK/OOK que es 011)
+    // Bit 3 = MANCHESTER_EN: 0 = deshabilitado
+    // Bits 2:0 = SYNC_MODE: 010 = 16-bit sync word
+    // Valor: 0x02 = 0000 0010
+    ELECHOUSE_cc1101.SpiWriteReg(0x12, 0x02);
 
-    Serial.println("[DooyaBidir] Configurando FSK (433.92 MHz, 2-FSK)");
+    // 7. MDMCFG1 (0x13) - FEC, preámbulo, channel spacing
+    // Bits 6:4 = NUM_PREAMBLE: 010 = 4 bytes preamble
+    // Valor: 0x22
+    ELECHOUSE_cc1101.SpiWriteReg(0x13, 0x22);
 
-    // NOTA: La implementación completa de FSK requiere acceso directo
-    // a los registros del CC1101. Algunas librerías no lo soportan.
-    // Si usas ELECHOUSE_cc1101, puede que necesites modificarla.
+    // 8. SYNC1/SYNC0 (0x04, 0x05) - Sync word para Dooya
+    // Sync word típico: 0xD391
+    ELECHOUSE_cc1101.SpiWriteReg(0x04, 0xD3);  // SYNC1
+    ELECHOUSE_cc1101.SpiWriteReg(0x05, 0x91);  // SYNC0
+
+    // 9. PKTCTRL1 (0x07) - Control de paquete 1
+    // Bit 2 = APPEND_STATUS: 0 = no agregar RSSI/LQI
+    ELECHOUSE_cc1101.SpiWriteReg(0x07, 0x00);
+
+    // 10. PKTCTRL0 (0x08) - Control de paquete 0
+    // Bits 1:0 = LENGTH_CONFIG: 00 = fixed length
+    // Bit 2 = CRC_EN: 0 = sin CRC
+    ELECHOUSE_cc1101.SpiWriteReg(0x08, 0x00);
+
+    // 11. PKTLEN (0x06) - Longitud fija del paquete
+    ELECHOUSE_cc1101.SpiWriteReg(0x06, DOOYA_BIDIR_FRAME_LEN);
+
+    // 12. Configurar potencia de transmisión
+    ELECHOUSE_cc1101.setPA(12);  // Potencia máxima
+
+    Serial.printf("[DooyaBidir] FSK configurado: 433.92 MHz, 2-FSK, ~4800 baud, dev ~25kHz\n");
 }
 
 void DooyaBidirectional::restoreASK() {
     // Restaurar configuración ASK/OOK para otros dispositivos
+
+    // Ir a IDLE
+    ELECHOUSE_cc1101.setSidle();
+    delay(1);
+
+    // Reinicializar el módulo con configuración por defecto
+    ELECHOUSE_cc1101.Init();
+
+    // Restaurar frecuencia por defecto (433.92 MHz)
+    ELECHOUSE_cc1101.setMHZ(433.92);
+
+    // Restaurar modulación ASK/OOK
     ELECHOUSE_cc1101.setModulation(2);  // 2 = ASK/OOK
+
+    // Configuración para modo async/raw (captura de señales)
+    ELECHOUSE_cc1101.setCCMode(1);
+    ELECHOUSE_cc1101.setSyncMode(0);    // Sin sync word
+    ELECHOUSE_cc1101.setCrc(0);         // Sin CRC
+    ELECHOUSE_cc1101.setPA(10);         // Potencia normal
 
     Serial.println("[DooyaBidir] Restaurado a ASK/OOK");
 }

@@ -27,6 +27,7 @@
         <nav class="nav-tabs">
             <button class="tab-btn active" data-tab="devices">Dispositivos</button>
             <button class="tab-btn" data-tab="capture">Capturar</button>
+            <button class="tab-btn" data-tab="identify">Identificar</button>
             <button class="tab-btn" data-tab="config">Configuración</button>
             <button class="tab-btn" data-tab="backup">Backup</button>
         </nav>
@@ -69,7 +70,7 @@
 
                     <!-- Paso 1: Seleccionar dispositivo y función -->
                     <div class="capture-target">
-                        <h3>1. Seleccionar destino</h3>
+                        <h3>1. Seleccionar destino (opcional)</h3>
                         <div class="form-row">
                             <div class="form-group">
                                 <label>Dispositivo</label>
@@ -85,7 +86,7 @@
                                 </select>
                             </div>
                         </div>
-                        <p class="help-text">Selecciona a qué dispositivo y función asignar la señal capturada</p>
+                        <p class="help-text">Opcional para capturar. Requerido solo para guardar la señal. Para A-OK puedes capturar primero y usar "Detectar A-OK".</p>
                     </div>
 
                     <!-- Paso 2: Configuración RF -->
@@ -123,11 +124,6 @@
                             </div>
                         </div>
 
-                        <div class="form-group">
-                            <label>
-                                <input type="checkbox" id="auto-detect" checked> Detección automática de frecuencia
-                            </label>
-                            <small>Escanea frecuencias comunes para encontrar la señal</small>
                         </div>
                     </div>
 
@@ -177,15 +173,81 @@
                         <div class="capture-actions">
                             <button class="btn btn-primary" onclick="testCapturedSignal()">Probar Señal</button>
                             <button class="btn btn-success" onclick="saveCurrentCapture()">Guardar</button>
+                            <button class="btn btn-warning" onclick="decodeAsAOK()">Detectar A-OK</button>
                             <button class="btn btn-secondary" onclick="clearCapture()">Nueva Captura</button>
                         </div>
                     </div>
 
-                    <!-- Opción de solo identificar -->
-                    <div class="identify-section">
-                        <h3>Solo identificar señal</h3>
-                        <p>Captura una señal sin guardarla, solo para ver su análisis</p>
-                        <button class="btn btn-secondary" onclick="identifySignal()">Identificar Señal</button>
+                </div>
+            </section>
+
+            <!-- Identificar Tab -->
+            <section id="identify-tab" class="tab-content">
+                <div class="identify-panel">
+                    <h2>Identificar Control Remoto</h2>
+                    <p class="help-text">
+                        El sistema escaneará automáticamente <strong>todas las frecuencias y modulaciones comunes</strong>
+                        para detectar tu control remoto y mostrarte la configuración correcta.
+                    </p>
+
+                    <div class="frequency-list">
+                        <h4>Frecuencias a escanear:</h4>
+                        <p>300, 303.87, 310, 315, 390, 418, 433, 433.42, 433.92, 434, 868, 915 MHz</p>
+                    </div>
+
+                    <div class="identify-controls">
+                        <button id="btn-identify" class="btn btn-large btn-primary" onclick="identifySignal()">
+                            Iniciar Identificación
+                        </button>
+                        <p class="help-text" style="margin-top: 15px;">
+                            Presiona el botón de tu control remoto <strong>repetidamente</strong> durante el escaneo.
+                        </p>
+                    </div>
+
+                    <div id="identify-status" class="identify-status" style="display:none;">
+                        <div class="spinner"></div>
+                        <p id="identify-status-text">Escaneando frecuencias...</p>
+                        <p id="identify-progress" class="help-text">0 / 12 frecuencias</p>
+                    </div>
+
+                    <div id="identify-result" class="identify-result" style="display:none;">
+                        <h4>Resultado de Identificación</h4>
+                        <div class="identify-info">
+                            <div class="info-row">
+                                <span class="info-label">Frecuencia detectada:</span>
+                                <span id="identify-freq" class="info-value">--</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="info-label">Modulación:</span>
+                                <span id="identify-mod" class="info-value">--</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="info-label">Protocolo:</span>
+                                <span id="identify-protocol" class="info-value">--</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="info-label">Intensidad (RSSI):</span>
+                                <span id="identify-rssi" class="info-value">--</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="info-label">Longitud señal:</span>
+                                <span id="identify-length" class="info-value">--</span>
+                            </div>
+                        </div>
+
+                        <div class="identify-analysis">
+                            <h5>Análisis Detallado</h5>
+                            <pre id="identify-analysis-text"></pre>
+                        </div>
+
+                        <div class="identify-actions">
+                            <button class="btn btn-success" onclick="useIdentifiedSettings()">
+                                Usar estos ajustes para capturar
+                            </button>
+                            <button class="btn btn-secondary" onclick="clearIdentifyResult()">
+                                Nueva identificación
+                            </button>
+                        </div>
                     </div>
                 </div>
             </section>
@@ -333,6 +395,17 @@
                     </button>
                 </div>
 
+                <div class="backup-section">
+                    <h3>Actualizar Firmware</h3>
+                    <p>Actualiza el firmware o el sistema de archivos del dispositivo.</p>
+                    <div class="update-options">
+                        <a href="/update" target="_blank" class="btn btn-primary btn-large">
+                            Abrir Actualizador OTA
+                        </a>
+                    </div>
+                    <small class="help-text">Se abrirá ElegantOTA en una nueva pestaña. Puedes subir firmware (.bin) o filesystem.</small>
+                </div>
+
                 <div class="backup-section danger-zone">
                     <h3>Zona de Peligro</h3>
                     <button class="btn btn-danger" onclick="confirmReboot()">Reiniciar Dispositivo</button>
@@ -358,6 +431,9 @@
                     <label>Tipo de dispositivo</label>
                     <select id="new-device-type" onchange="showDeviceTypeInfo(this.value)">
                         <option value="1">Cortina (Abrir / Cerrar / Parar)</option>
+                        <option value="10">Cortina Somfy RTS (Rolling Code)</option>
+                        <option value="11">Cortina Dooya Bidir (FSK)</option>
+                        <option value="12">Cortina A-OK AC114</option>
                         <option value="2">Interruptor (On / Off)</option>
                         <option value="3">Botón (Pulsar)</option>
                         <option value="4">Portón (Toggle o Abrir/Cerrar)</option>
@@ -367,6 +443,54 @@
                         <option value="99">Otro (Personalizado)</option>
                     </select>
                     <small id="device-type-info" class="help-text">3 señales: Abrir, Cerrar, Parar</small>
+                </div>
+                <!-- Somfy RTS Config -->
+                <div id="somfy-config" class="protocol-config" style="display:none;">
+                    <div class="form-group">
+                        <label>Dirección Somfy (hex)</label>
+                        <div class="input-with-button">
+                            <input type="text" id="new-somfy-address" placeholder="Ej: A1B2C3">
+                            <button type="button" class="btn btn-small btn-secondary" onclick="generateRandomSomfyAddress()">Generar</button>
+                        </div>
+                        <small class="help-text">Dirección de 3 bytes. Genera una nueva para crear un control virtual.</small>
+                    </div>
+                    <div class="form-group">
+                        <label>Rolling Code inicial</label>
+                        <input type="number" id="new-somfy-rolling" value="1" min="0" max="65535">
+                        <small class="help-text">Código inicial (se incrementa automáticamente)</small>
+                    </div>
+                </div>
+                <!-- Dooya Bidir Config -->
+                <div id="dooya-config" class="protocol-config" style="display:none;">
+                    <div class="form-group">
+                        <label>Device ID (hex)</label>
+                        <div class="input-with-button">
+                            <input type="text" id="new-dooya-device-id" placeholder="Ej: 12345678">
+                            <button type="button" class="btn btn-small btn-secondary" onclick="generateRandomDooyaId()">Generar</button>
+                        </div>
+                        <small class="help-text">ID de 4 bytes. Genera uno nuevo para crear un control virtual.</small>
+                    </div>
+                    <div class="form-group">
+                        <label>Unit Code</label>
+                        <input type="number" id="new-dooya-unit" value="1" min="0" max="15">
+                        <small class="help-text">Canal del motor (0-15)</small>
+                    </div>
+                </div>
+                <!-- A-OK AC114 Config -->
+                <div id="aok-config" class="protocol-config" style="display:none;">
+                    <div class="form-group">
+                        <label>Remote ID (hex)</label>
+                        <div class="input-with-button">
+                            <input type="text" id="new-aok-remote-id" placeholder="Ej: A1B2C3">
+                            <button type="button" class="btn btn-small btn-secondary" onclick="generateRandomAokId()">Generar</button>
+                        </div>
+                        <small class="help-text">ID de 3 bytes. Copia el de tu control original o genera uno nuevo.</small>
+                    </div>
+                    <div class="form-group">
+                        <label>Canal</label>
+                        <input type="number" id="new-aok-channel" value="1" min="0" max="16">
+                        <small class="help-text">Canal del motor (1-16) o 0 para control grupal (todas las cortinas)</small>
+                    </div>
                 </div>
                 <div class="form-group">
                     <label>Habitación (opcional)</label>
@@ -397,6 +521,8 @@
                     <label>Tipo de dispositivo</label>
                     <select id="edit-device-type">
                         <option value="1">Cortina (Abrir / Cerrar / Parar)</option>
+                        <option value="10">Cortina Somfy RTS (Rolling Code)</option>
+                        <option value="11">Cortina Dooya Bidir (FSK)</option>
                         <option value="2">Interruptor (On / Off)</option>
                         <option value="3">Botón (Pulsar)</option>
                         <option value="4">Portón (Toggle o Abrir/Cerrar)</option>

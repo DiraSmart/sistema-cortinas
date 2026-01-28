@@ -22,6 +22,9 @@ const DEVICE_TYPES = {
     5: { name: 'Luz', signals: ['Encender', 'Apagar'], icon: '💡' },
     6: { name: 'Ventilador', signals: ['Encender', 'Apagar', 'Velocidad'], icon: '🌀' },
     7: { name: 'Dimmer', signals: ['Encender', 'Apagar', 'Subir', 'Bajar'], icon: '🔆' },
+    10: { name: 'Cortina Somfy RTS', signals: ['Abrir', 'Cerrar', 'My/Stop', 'Prog'], icon: '🏠', protocol: 'somfy' },
+    11: { name: 'Cortina Dooya Bidir', signals: ['Abrir', 'Cerrar', 'Parar', 'Prog'], icon: '🏠', protocol: 'dooya' },
+    12: { name: 'Cortina A-OK AC114', signals: ['Abrir', 'Cerrar', 'Parar', 'Prog'], icon: '🏠', protocol: 'aok' },
     99: { name: 'Otro', signals: ['Señal 1', 'Señal 2', 'Señal 3', 'Señal 4'], icon: '📡' }
 };
 
@@ -187,13 +190,26 @@ function renderDevices() {
 
     container.innerHTML = filtered.map(device => {
         const typeInfo = DEVICE_TYPES[device.type] || DEVICE_TYPES[99];
-        const signalButtons = (device.signals || [])
-            .filter(sig => sig && sig.valid)
-            .map(sig => `
-                <button class="signal-btn" onclick="transmitSignal('${device.id}', ${sig.index})">
-                    ${escapeHtml(sig.name || typeInfo.signals[sig.index] || 'Señal ' + (sig.index + 1))}
-                </button>
-            `).join('');
+
+        // Protocol-based devices (Somfy, Dooya, A-OK) have virtual controls
+        let signalButtons = '';
+        if (device.type === 10 || device.type === 11 || device.type === 12) {
+            // Virtual control buttons for protocol devices
+            signalButtons = `
+                <button class="signal-btn btn-success" onclick="transmitSignal('${device.id}', 0)">Abrir</button>
+                <button class="signal-btn btn-primary" onclick="transmitSignal('${device.id}', 2)">Parar</button>
+                <button class="signal-btn btn-success" onclick="transmitSignal('${device.id}', 1)">Cerrar</button>
+            `;
+        } else {
+            // Regular devices use captured signals
+            signalButtons = (device.signals || [])
+                .filter(sig => sig && sig.valid)
+                .map(sig => `
+                    <button class="signal-btn" onclick="transmitSignal('${device.id}', ${sig.index})">
+                        ${escapeHtml(sig.name || typeInfo.signals[sig.index] || 'Señal ' + (sig.index + 1))}
+                    </button>
+                `).join('');
+        }
 
         return `
             <div class="device-card" data-id="${device.id}">
@@ -241,6 +257,33 @@ function showDeviceTypeInfo(type) {
 
     const typeInfo = DEVICE_TYPES[type] || DEVICE_TYPES[99];
     info.textContent = `${typeInfo.signals.length} señales: ${typeInfo.signals.join(', ')}`;
+
+    // Show/hide protocol-specific config
+    const somfyConfig = document.getElementById('somfy-config');
+    const dooyaConfig = document.getElementById('dooya-config');
+    const aokConfig = document.getElementById('aok-config');
+
+    if (somfyConfig) somfyConfig.style.display = (type == '10') ? 'block' : 'none';
+    if (dooyaConfig) dooyaConfig.style.display = (type == '11') ? 'block' : 'none';
+    if (aokConfig) aokConfig.style.display = (type == '12') ? 'block' : 'none';
+}
+
+// Generar dirección Somfy aleatoria (3 bytes = 6 caracteres hex)
+function generateRandomSomfyAddress() {
+    const addr = Math.floor(Math.random() * 0xFFFFFF).toString(16).toUpperCase().padStart(6, '0');
+    document.getElementById('new-somfy-address').value = addr;
+}
+
+// Generar Device ID Dooya aleatorio (4 bytes = 8 caracteres hex)
+function generateRandomDooyaId() {
+    const id = Math.floor(Math.random() * 0xFFFFFFFF).toString(16).toUpperCase().padStart(8, '0');
+    document.getElementById('new-dooya-device-id').value = id;
+}
+
+// Generar Remote ID A-OK aleatorio (3 bytes = 6 caracteres hex)
+function generateRandomAokId() {
+    const id = Math.floor(Math.random() * 0xFFFFFF).toString(16).toUpperCase().padStart(6, '0');
+    document.getElementById('new-aok-remote-id').value = id;
 }
 
 // ============================================
@@ -265,16 +308,64 @@ async function addDevice() {
         return;
     }
 
+    // Build device data
+    const deviceData = { name, type, room };
+
+    // Add Somfy RTS config
+    if (type === 10) {
+        let addrHex = document.getElementById('new-somfy-address')?.value?.trim() || '';
+        // Auto-generar dirección si está vacía
+        if (!addrHex) {
+            addrHex = Math.floor(Math.random() * 0xFFFFFF).toString(16).toUpperCase().padStart(6, '0');
+            showToast(`Dirección Somfy generada: ${addrHex}`, 'success');
+        }
+        const rolling = parseInt(document.getElementById('new-somfy-rolling')?.value) || 1;
+        deviceData.somfy_address = parseInt(addrHex, 16) || 0;
+        deviceData.somfy_rolling_code = rolling;
+    }
+
+    // Add Dooya Bidir config
+    if (type === 11) {
+        let devIdHex = document.getElementById('new-dooya-device-id')?.value?.trim() || '';
+        // Auto-generar Device ID si está vacío
+        if (!devIdHex) {
+            devIdHex = Math.floor(Math.random() * 0xFFFFFFFF).toString(16).toUpperCase().padStart(8, '0');
+            showToast(`Device ID Dooya generado: ${devIdHex}`, 'success');
+        }
+        const unitCode = parseInt(document.getElementById('new-dooya-unit')?.value) || 1;
+        deviceData.dooya_device_id = parseInt(devIdHex, 16) || 0;
+        deviceData.dooya_unit_code = unitCode;
+    }
+
+    // Add A-OK AC114 config
+    if (type === 12) {
+        let remoteIdHex = document.getElementById('new-aok-remote-id')?.value?.trim() || '';
+        // Auto-generar Remote ID si está vacío
+        if (!remoteIdHex) {
+            remoteIdHex = Math.floor(Math.random() * 0xFFFFFF).toString(16).toUpperCase().padStart(6, '0');
+            showToast(`Remote ID A-OK generado: ${remoteIdHex}`, 'success');
+        }
+        const channelValue = document.getElementById('new-aok-channel')?.value;
+        const channel = channelValue !== '' && channelValue !== undefined ? parseInt(channelValue) : 1;
+        deviceData.aok_remote_id = parseInt(remoteIdHex, 16) || 0;
+        deviceData.aok_channel = channel;
+    }
+
     try {
         const response = await fetch('/api/devices', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, type, room })
+            body: JSON.stringify(deviceData)
         });
 
         const data = await response.json();
         if (data.success) {
-            showToast('Dispositivo agregado. Ahora ve a Capturar para grabar las señales.', 'success');
+            // Different message for protocol-based devices
+            if (type === 10 || type === 11 || type === 12) {
+                showToast('Dispositivo agregado. Ya puedes controlarlo desde MQTT/Home Assistant.', 'success');
+            } else {
+                showToast('Dispositivo agregado. Ahora ve a Capturar para grabar las señales.', 'success');
+            }
             closeModal('modal-add-device');
             loadDevices();
         } else {
@@ -308,7 +399,115 @@ function renderDeviceSignals(device) {
     const typeInfo = DEVICE_TYPES[device.type] || DEVICE_TYPES[99];
     const signals = device.signals || [];
 
-    // Mostrar todas las señales posibles para este tipo
+    // For Somfy and Dooya, show protocol info and pairing instructions
+    if (device.type === 10) {
+        // Somfy RTS
+        const addr = device.somfy?.address || 0;
+        const rolling = device.somfy?.rollingCode || 0;
+        container.innerHTML = `
+            <div class="protocol-info">
+                <h4>Somfy RTS - Control Virtual</h4>
+                <p><strong>Dirección:</strong> ${addr.toString(16).toUpperCase().padStart(6, '0')}</p>
+                <p><strong>Rolling Code:</strong> ${rolling}</p>
+
+                <div class="pairing-instructions">
+                    <h5>Para vincular con tu motor:</h5>
+                    <ol>
+                        <li>Mantén presionado el botón <strong>PROG</strong> en tu control Somfy original hasta que la cortina se mueva brevemente</li>
+                        <li>Presiona el botón <strong>"Programar"</strong> abajo dentro de 2 segundos</li>
+                        <li>La cortina se moverá confirmando el emparejamiento</li>
+                    </ol>
+                </div>
+
+                <div class="signal-slot-actions" style="margin-top: 15px;">
+                    <button class="btn btn-warning" onclick="transmitSignal('${device.id}', 3)">Programar</button>
+                </div>
+
+                <hr style="margin: 20px 0; border-color: rgba(255,255,255,0.1);">
+                <h5>Control</h5>
+                <div class="signal-slot-actions">
+                    <button class="btn btn-success" onclick="transmitSignal('${device.id}', 0)">Abrir</button>
+                    <button class="btn btn-primary" onclick="transmitSignal('${device.id}', 2)">My/Stop</button>
+                    <button class="btn btn-success" onclick="transmitSignal('${device.id}', 1)">Cerrar</button>
+                </div>
+            </div>
+        `;
+        return;
+    }
+
+    if (device.type === 11) {
+        // Dooya Bidir
+        const devId = device.dooyaBidir?.deviceId || 0;
+        const unit = device.dooyaBidir?.unitCode || 0;
+        container.innerHTML = `
+            <div class="protocol-info">
+                <h4>Dooya Bidireccional - Control Virtual</h4>
+                <p><strong>Device ID:</strong> ${devId.toString(16).toUpperCase().padStart(8, '0')}</p>
+                <p><strong>Unit Code:</strong> ${unit}</p>
+
+                <div class="pairing-instructions">
+                    <h5>Para vincular con tu motor:</h5>
+                    <ol>
+                        <li>Presiona el botón <strong>P2</strong> en tu motor Dooya (o desconecta y reconecta la energía)</li>
+                        <li>La cortina hará un movimiento corto indicando modo programación</li>
+                        <li>Presiona el botón <strong>"Programar"</strong> abajo dentro de 10 segundos</li>
+                        <li>La cortina se moverá confirmando el emparejamiento</li>
+                    </ol>
+                </div>
+
+                <div class="signal-slot-actions" style="margin-top: 15px;">
+                    <button class="btn btn-warning" onclick="transmitSignal('${device.id}', 3)">Programar</button>
+                </div>
+
+                <hr style="margin: 20px 0; border-color: rgba(255,255,255,0.1);">
+                <h5>Control</h5>
+                <div class="signal-slot-actions">
+                    <button class="btn btn-success" onclick="transmitSignal('${device.id}', 0)">Abrir</button>
+                    <button class="btn btn-primary" onclick="transmitSignal('${device.id}', 2)">Parar</button>
+                    <button class="btn btn-success" onclick="transmitSignal('${device.id}', 1)">Cerrar</button>
+                </div>
+            </div>
+        `;
+        return;
+    }
+
+    if (device.type === 12) {
+        // A-OK AC114
+        const remoteId = device.aok?.remoteId || 0;
+        const channel = device.aok?.channel ?? 1;
+        const channelDisplay = channel === 0 ? '0 (Grupo - Todas las cortinas)' : channel;
+        container.innerHTML = `
+            <div class="protocol-info">
+                <h4>A-OK AC114 - Control Virtual</h4>
+                <p><strong>Remote ID:</strong> ${remoteId.toString(16).toUpperCase().padStart(6, '0')}</p>
+                <p><strong>Canal:</strong> ${channelDisplay}</p>
+
+                <div class="pairing-instructions">
+                    <h5>Para vincular con tu motor:</h5>
+                    <ol>
+                        <li>Mantén presionado el botón <strong>P2/STOP</strong> en tu motor A-OK hasta que haga un movimiento corto</li>
+                        <li>Presiona el botón <strong>"Programar"</strong> abajo dentro de 5 segundos</li>
+                        <li>El motor se moverá confirmando el emparejamiento</li>
+                    </ol>
+                </div>
+
+                <div class="signal-slot-actions" style="margin-top: 15px;">
+                    <button class="btn btn-warning" onclick="transmitSignal('${device.id}', 3)">Programar</button>
+                </div>
+
+                <hr style="margin: 20px 0; border-color: rgba(255,255,255,0.1);">
+                <h5>Control</h5>
+                <div class="signal-slot-actions">
+                    <button class="btn btn-success" onclick="transmitSignal('${device.id}', 0)">Abrir</button>
+                    <button class="btn btn-primary" onclick="transmitSignal('${device.id}', 2)">Parar</button>
+                    <button class="btn btn-success" onclick="transmitSignal('${device.id}', 1)">Cerrar</button>
+                </div>
+            </div>
+        `;
+        return;
+    }
+
+    // For regular devices, show signal capture UI
     let html = '<div class="signals-grid">';
 
     typeInfo.signals.forEach((signalName, idx) => {
@@ -317,12 +516,13 @@ function renderDeviceSignals(device) {
 
         const freqRounded = hasSignal ? parseFloat(signal.frequency).toFixed(2) : '';
         const repeatCount = hasSignal ? (signal.repeatCount || 5) : 5;
+        const isInverted = hasSignal ? (signal.inverted || false) : false;
 
         html += `
             <div class="signal-slot ${hasSignal ? 'configured' : 'empty'}">
                 <div class="signal-slot-header">
                     <span class="signal-slot-name">${signalName}</span>
-                    ${hasSignal ? `<span class="signal-slot-info">${freqRounded} MHz</span>` : ''}
+                    ${hasSignal ? `<span class="signal-slot-info">${freqRounded} MHz${isInverted ? ' (INV)' : ''}</span>` : ''}
                 </div>
                 ${hasSignal ? `
                 <div class="signal-slot-repeat">
@@ -330,6 +530,14 @@ function renderDeviceSignals(device) {
                     <input type="number" class="repeat-input" id="repeat-${device.id}-${idx}"
                            value="${repeatCount}" min="1" max="20"
                            onchange="updateSignalRepeat('${device.id}', ${idx}, this.value)">
+                </div>
+                <div class="signal-slot-invert">
+                    <label>
+                        <input type="checkbox" id="invert-${device.id}-${idx}"
+                               ${isInverted ? 'checked' : ''}
+                               onchange="updateSignalInvert('${device.id}', ${idx}, this.checked)">
+                        Invertir señal
+                    </label>
                 </div>
                 ` : ''}
                 <div class="signal-slot-actions">
@@ -465,6 +673,42 @@ async function updateSignalRepeat(deviceId, signalIndex, repeatCount) {
     }
 }
 
+async function updateSignalInvert(deviceId, signalIndex, inverted) {
+    try {
+        const response = await fetch('/api/signal/invert', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                deviceId,
+                signalIndex,
+                inverted
+            })
+        });
+
+        const data = await response.json();
+        if (data.success) {
+            showToast(inverted ? 'Señal invertida' : 'Señal normal', 'success');
+            // Update local cache
+            const device = devices.find(d => d.id === deviceId);
+            if (device && device.signals) {
+                const signal = device.signals.find(s => s && s.index === signalIndex);
+                if (signal) signal.inverted = inverted;
+            }
+        } else {
+            showToast(data.error || 'Error al actualizar', 'error');
+            // Revert checkbox
+            const checkbox = document.getElementById(`invert-${deviceId}-${signalIndex}`);
+            if (checkbox) checkbox.checked = !inverted;
+        }
+    } catch (error) {
+        console.error('Error updating invert flag:', error);
+        showToast('Error de conexión', 'error');
+        // Revert checkbox
+        const checkbox = document.getElementById(`invert-${deviceId}-${signalIndex}`);
+        if (checkbox) checkbox.checked = !inverted;
+    }
+}
+
 // ============================================
 // Captura de Señales RF
 // ============================================
@@ -505,13 +749,23 @@ function updateCaptureSignalOptions() {
 
 async function transmitSignal(deviceId, signalIndex) {
     const btn = event?.target;
+    const originalText = btn?.textContent;
+
     try {
         if (btn) {
             btn.disabled = true;
             btn.textContent = 'Enviando...';
         }
 
-        const response = await fetch(`/api/rf/transmit?id=${deviceId}&signal=${signalIndex}`);
+        // Agregar timeout de 10 segundos
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+        const response = await fetch(`/api/rf/transmit?id=${deviceId}&signal=${signalIndex}`, {
+            signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+
         const data = await response.json();
 
         if (data.success) {
@@ -521,28 +775,28 @@ async function transmitSignal(deviceId, signalIndex) {
         }
     } catch (error) {
         console.error('Error transmitting signal:', error);
-        showToast('Error de conexión', 'error');
+        if (error.name === 'AbortError') {
+            showToast('Timeout - el dispositivo no respondió', 'error');
+        } else {
+            showToast('Error de conexión', 'error');
+        }
     } finally {
         if (btn) {
             btn.disabled = false;
-            loadDevices();
+            btn.textContent = originalText || 'Enviar';
         }
+        // Reload devices to update rolling codes etc
+        loadDevices();
     }
 }
 
 async function startCapture() {
-    const deviceId = document.getElementById('capture-device')?.value;
-    const signalSlot = document.getElementById('capture-signal-slot')?.value;
-
-    if (!identifyMode && (!deviceId || signalSlot === '')) {
-        showToast('Selecciona un dispositivo y función primero', 'error');
-        return;
-    }
+    // Ya no se requiere dispositivo para capturar - solo para guardar
+    // Esto permite capturar señales A-OK para auto-descubrimiento
 
     const freqSelect = document.getElementById('capture-frequency');
     const customFreq = document.getElementById('custom-frequency');
     const modSelect = document.getElementById('capture-modulation');
-    const autoDetect = document.getElementById('auto-detect').checked;
 
     let frequency = parseFloat(freqSelect.value);
     if (freqSelect.value === 'custom') {
@@ -562,7 +816,7 @@ async function startCapture() {
         document.getElementById('capture-status').classList.add('capturing');
         document.getElementById('capture-result').style.display = 'none';
 
-        const url = `/api/rf/capture/start?frequency=${frequency}&modulation=${modulation}&auto=${autoDetect}`;
+        const url = `/api/rf/capture/start?frequency=${frequency}&modulation=${modulation}`;
         const response = await fetch(url);
         const data = await response.json();
 
@@ -665,6 +919,120 @@ function getModulationName(mod) {
     return mods[mod] || 'Desconocida';
 }
 
+function detectRCSwitchProtocol(pulses) {
+    // Detectar protocolos RC-Switch/ESPHome
+    // Basado en: https://github.com/sui77/rc-switch y ESPHome
+
+    if (pulses.length < 20) return null;
+
+    // Protocolos RC-Switch/ESPHome completos
+    // { num, name, base, syncHigh, syncLow, zero[high,low], one[high,low], inverted }
+    const protocols = [
+        { num: 1, name: 'Protocol 1', base: 350, syncHigh: 1, syncLow: 31, zero: [1,3], one: [3,1], inverted: false },
+        { num: 2, name: 'Protocol 2', base: 650, syncHigh: 1, syncLow: 10, zero: [1,2], one: [2,1], inverted: false },
+        { num: 3, name: 'Protocol 3', base: 100, syncHigh: 30, syncLow: 71, zero: [4,11], one: [9,6], inverted: false },
+        { num: 4, name: 'Protocol 4', base: 380, syncHigh: 1, syncLow: 6, zero: [1,3], one: [3,1], inverted: false },
+        { num: 5, name: 'Protocol 5', base: 500, syncHigh: 6, syncLow: 14, zero: [1,2], one: [2,1], inverted: false },
+        { num: 6, name: 'Protocol 6', base: 450, syncHigh: 23, syncLow: 1, zero: [1,2], one: [2,1], inverted: true },
+        { num: 7, name: 'Protocol 7', base: 150, syncHigh: 2, syncLow: 62, zero: [1,6], one: [6,1], inverted: false },
+        { num: 8, name: 'Protocol 8', base: 200, syncHigh: 3, syncLow: 130, zero: [7,16], one: [3,16], inverted: false },
+        { num: 9, name: 'Protocol 9', base: 365, syncHigh: 18, syncLow: 1, zero: [3,1], one: [1,3], inverted: true },
+        { num: 10, name: 'Protocol 10', base: 270, syncHigh: 36, syncLow: 1, zero: [1,2], one: [2,1], inverted: true },
+        { num: 11, name: 'Protocol 11', base: 320, syncHigh: 1, syncLow: 36, zero: [1,2], one: [2,1], inverted: false },
+        { num: 12, name: 'Protocol 12', base: 250, syncHigh: 1, syncLow: 44, zero: [1,4], one: [4,1], inverted: false },
+    ];
+
+    // Encontrar el pulso más largo (sync)
+    let maxPulse = 0, maxIndex = -1;
+    for (let i = 0; i < pulses.length; i++) {
+        if (pulses[i] > maxPulse) {
+            maxPulse = pulses[i];
+            maxIndex = i;
+        }
+    }
+    if (maxIndex < 0 || maxPulse < 2000) return null;
+
+    // Determinar si el sync es HIGH (índice par) o LOW (índice impar)
+    const syncIsHigh = maxIndex % 2 === 0;
+
+    // Calcular base estimada
+    const shortPulses = pulses.filter(p => p > 100 && p < 1000);
+    const estimatedBase = shortPulses.length > 0 ? Math.min(...shortPulses) : 300;
+
+    // Probar cada protocolo
+    for (const proto of protocols) {
+        // Calcular sync esperado
+        const expectedSyncLong = (proto.inverted ? proto.syncHigh : proto.syncLow) * proto.base;
+
+        // Verificar si el patrón de sync coincide
+        const syncMatches = (syncIsHigh === proto.inverted) &&
+                           Math.abs(maxPulse - expectedSyncLong) < expectedSyncLong * 0.4;
+
+        if (!syncMatches) continue;
+
+        // Calcular base real desde el sync
+        const actualBase = maxPulse / (proto.inverted ? proto.syncHigh : proto.syncLow);
+
+        // Intentar decodificar bits
+        const bits = decodeProtocolBits(pulses, maxIndex, actualBase, proto);
+        if (bits && bits.length >= 12) {
+            return {
+                protocol: proto.name,
+                protocolNum: proto.num,
+                syncPulse: maxPulse,
+                baseUnit: Math.round(actualBase),
+                syncRatio: Math.round(maxPulse / actualBase),
+                inverted: proto.inverted,
+                bits: bits,
+                code: parseInt(bits, 2),
+                codeHex: '0x' + parseInt(bits, 2).toString(16).toUpperCase()
+            };
+        }
+    }
+
+    // No coincide con ningún protocolo conocido
+    return {
+        protocol: 'Desconocido',
+        protocolNum: null,
+        syncPulse: maxPulse,
+        baseUnit: estimatedBase,
+        syncRatio: Math.round(maxPulse / estimatedBase),
+        inverted: syncIsHigh,
+        bits: null,
+        code: null
+    };
+}
+
+function decodeProtocolBits(pulses, syncIndex, baseUnit, proto) {
+    let bits = '';
+    const tolerance = baseUnit * 0.5;
+    const startIndex = (syncIndex + 1) % pulses.length;
+
+    for (let i = startIndex; i < pulses.length - 1 && bits.length < 32; i += 2) {
+        let high = pulses[i];
+        let low = pulses[i + 1];
+
+        // Para protocolos invertidos, el primer pulso es LOW
+        if (proto.inverted) {
+            [high, low] = [low, high];
+        }
+
+        // Verificar '0'
+        const isZero = Math.abs(high - proto.zero[0] * baseUnit) < tolerance &&
+                       Math.abs(low - proto.zero[1] * baseUnit) < tolerance;
+
+        // Verificar '1'
+        const isOne = Math.abs(high - proto.one[0] * baseUnit) < tolerance &&
+                      Math.abs(low - proto.one[1] * baseUnit) < tolerance;
+
+        if (isZero) bits += '0';
+        else if (isOne) bits += '1';
+        else break;
+    }
+
+    return bits.length >= 12 ? bits : null;
+}
+
 function formatRawSignal(hexData) {
     if (!hexData || hexData.length < 4) return 'Sin datos';
 
@@ -687,18 +1055,31 @@ function formatRawSignal(hexData) {
     let output = `Total: ${pulses.length} pulsos\n`;
     output += `================================================\n\n`;
 
-    // ESPHome raw format (copy-paste ready)
-    output += `FORMATO ESPHOME (copiar/pegar):\n`;
-    output += `------------------------------------------------\n`;
-    output += `code: [`;
-
-    // Format in rows of 8 values
-    for (let i = 0; i < esphomePulses.length; i++) {
-        if (i > 0) output += ', ';
-        if (i > 0 && i % 8 === 0) output += '\n       ';
-        output += esphomePulses[i];
+    // Detectar protocolo RC-Switch
+    const rcswitch = detectRCSwitchProtocol(pulses);
+    if (rcswitch) {
+        output += `PROTOCOLO RC-SWITCH:\n`;
+        output += `------------------------------------------------\n`;
+        if (rcswitch.protocolNum) {
+            output += `Tipo: ${rcswitch.protocol} (protocol=${rcswitch.protocolNum})\n`;
+        } else {
+            output += `Tipo: ${rcswitch.protocol}\n`;
+        }
+        output += `Sync: ${rcswitch.syncPulse}us (ratio: ${rcswitch.syncRatio}x)${rcswitch.inverted ? ' [INVERTIDO]' : ''}\n`;
+        output += `Base: ${rcswitch.baseUnit}us\n`;
+        if (rcswitch.bits) {
+            output += `Bits: ${rcswitch.bits} (${rcswitch.bits.length} bits)\n`;
+            output += `Código: ${rcswitch.code} / ${rcswitch.codeHex}\n`;
+            // Separar address y data para 24 bits (20+4)
+            if (rcswitch.bits.length === 24) {
+                const address = parseInt(rcswitch.bits.substring(0, 20), 2);
+                const data = parseInt(rcswitch.bits.substring(20), 2);
+                output += `  → Address: ${address} (0x${address.toString(16).toUpperCase()})\n`;
+                output += `  → Data: ${data} (0x${data.toString(16).toUpperCase()})\n`;
+            }
+        }
+        output += `\n`;
     }
-    output += `]\n\n`;
 
     // Timing analysis
     output += `ANALISIS DE TIEMPOS:\n`;
@@ -721,16 +1102,20 @@ function formatRawSignal(hexData) {
         output += `LOW:  min=${minLow}us, max=${maxLow}us, avg=${avgLow}us\n`;
     }
 
-    // Visual pulse table
-    output += `\nPULSOS DETALLADOS:\n`;
+    output += `\n`;
+
+    // ESPHome raw format (copy-paste ready)
+    output += `FORMATO ESPHOME (copiar/pegar):\n`;
     output += `------------------------------------------------\n`;
-    for (let i = 0; i < Math.min(pulses.length, 50); i++) {
-        const isHigh = i % 2 === 0;
-        output += `${(i).toString().padStart(2)}) ${isHigh ? 'HIGH' : 'LOW '} ${pulses[i].toString().padStart(5)}us\n`;
+    output += `code: [`;
+
+    // Format in rows of 8 values
+    for (let i = 0; i < esphomePulses.length; i++) {
+        if (i > 0) output += ', ';
+        if (i > 0 && i % 8 === 0) output += '\n       ';
+        output += esphomePulses[i];
     }
-    if (pulses.length > 50) {
-        output += `... y ${pulses.length - 50} pulsos mas\n`;
-    }
+    output += `]\n`;
 
     return output;
 }
@@ -859,6 +1244,78 @@ function clearCapture() {
     identifyMode = false;
     document.getElementById('capture-result').style.display = 'none';
     document.getElementById('capture-status').classList.remove('capturing');
+}
+
+// Decodificar señal capturada como A-OK y crear dispositivo
+async function decodeAsAOK() {
+    if (!capturedSignal || !capturedSignal.data) {
+        showToast('Primero captura una señal', 'error');
+        return;
+    }
+
+    showToast('Analizando señal A-OK...', 'info');
+
+    try {
+        const response = await fetch('/api/rf/decode-aok', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({})
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+            const remoteIdHex = data.remote_id_hex;
+            const channel = data.channel;
+
+            showToast(`¡A-OK detectado! ID: ${remoteIdHex}, Canal: ${channel}`, 'success');
+
+            // Ask user if they want to create the device
+            if (confirm(`Señal A-OK decodificada:\n\nRemote ID: ${remoteIdHex}\nCanal: ${channel}\n\n¿Desea crear un dispositivo A-OK con estos datos?`)) {
+                await createAOKDevice(remoteIdHex, channel);
+            }
+        } else {
+            showToast(data.message || 'No es una señal A-OK válida', 'warning');
+        }
+    } catch (error) {
+        console.error('Error decoding A-OK:', error);
+        showToast('Error al decodificar', 'error');
+    }
+}
+
+// Crear dispositivo A-OK automáticamente
+async function createAOKDevice(remoteIdHex, channel) {
+    const name = prompt('Nombre para el dispositivo:', 'Cortina A-OK');
+    if (!name) return;
+
+    const room = prompt('Habitación (opcional):', '');
+
+    try {
+        const response = await fetch('/api/devices', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                name: name,
+                type: 12,  // DEVICE_CURTAIN_AOK
+                room: room || '',
+                aok_remote_id: parseInt(remoteIdHex, 16),
+                aok_channel: channel
+            })
+        });
+
+        const data = await response.json();
+        if (data.success) {
+            showToast('Dispositivo A-OK creado! Puedes controlarlo desde la pestaña Dispositivos.', 'success');
+            loadDevices();
+            // Switch to devices tab
+            document.querySelector('[data-tab="devices"]')?.click();
+        } else {
+            showToast(data.error || 'Error al crear dispositivo', 'error');
+        }
+    } catch (error) {
+        console.error('Error creating A-OK device:', error);
+        showToast('Error de conexión', 'error');
+    }
 }
 
 // ============================================
@@ -1132,6 +1589,140 @@ function showToast(message, type = 'success') {
         toast.style.animation = 'slideIn 0.3s ease reverse';
         setTimeout(() => toast.remove(), 300);
     }, 3000);
+}
+
+// ============================================
+// Identificación de Señales RF
+// ============================================
+
+let identifiedSignalData = null;
+
+async function identifySignal() {
+    const btnIdentify = document.getElementById('btn-identify');
+    const statusDiv = document.getElementById('identify-status');
+    const statusText = document.getElementById('identify-status-text');
+    const resultDiv = document.getElementById('identify-result');
+
+    // Mostrar estado de escaneo
+    btnIdentify.style.display = 'none';
+    statusDiv.style.display = 'flex';
+    resultDiv.style.display = 'none';
+    identifiedSignalData = null;
+
+    // Lista de frecuencias que escanea el backend (12 frecuencias × 3 modulaciones)
+    const frequencies = [300, 303.87, 310, 315, 390, 418, 433, 433.42, 433.92, 434, 868, 915];
+    const modulations = ['ASK/OOK', '2-FSK', 'GFSK'];
+    const progressText = document.getElementById('identify-progress');
+
+    let freqIndex = 0;
+    let modIndex = 0;
+    const stepInterval = setInterval(() => {
+        if (freqIndex < frequencies.length) {
+            statusText.textContent = `Escaneando ${frequencies[freqIndex]} MHz (${modulations[modIndex]})...`;
+            progressText.textContent = `${freqIndex + 1} / ${frequencies.length} frecuencias`;
+            freqIndex++;
+        } else if (modIndex < modulations.length - 1) {
+            // Pasar a la siguiente modulación
+            modIndex++;
+            freqIndex = 0;
+            statusText.textContent = `Cambiando a modulación ${modulations[modIndex]}...`;
+        } else {
+            statusText.textContent = 'Analizando señal detectada...';
+        }
+    }, 1000);
+
+    try {
+        const response = await fetch('/api/rf/identify', {
+            method: 'GET',
+            headers: { 'Accept': 'application/json' }
+        });
+
+        clearInterval(stepInterval);
+
+        const data = await response.json();
+
+        if (data.success) {
+            // Guardar datos identificados
+            identifiedSignalData = data;
+
+            // Mostrar resultados
+            document.getElementById('identify-freq').textContent = data.frequency + ' MHz';
+            document.getElementById('identify-mod').textContent = data.modulation_name || 'ASK/OOK';
+            document.getElementById('identify-protocol').textContent = data.protocol || 'Genérico';
+            document.getElementById('identify-rssi').textContent = data.rssi + ' dBm';
+            document.getElementById('identify-length').textContent = data.length + ' bytes';
+            document.getElementById('identify-analysis-text').textContent = data.analysis || 'Sin análisis disponible';
+
+            statusDiv.style.display = 'none';
+            resultDiv.style.display = 'block';
+
+            showToast('Señal identificada correctamente', 'success');
+        } else {
+            statusDiv.style.display = 'none';
+            btnIdentify.style.display = 'block';
+
+            if (data.frequency) {
+                showToast(`Actividad RF detectada en ${data.frequency} MHz pero no se pudo capturar. Mantén presionado el botón.`, 'warning');
+            } else {
+                showToast(data.message || 'No se detectó ninguna señal RF', 'error');
+            }
+        }
+    } catch (error) {
+        clearInterval(stepInterval);
+        console.error('Error identifying signal:', error);
+        statusDiv.style.display = 'none';
+        btnIdentify.style.display = 'block';
+        showToast('Error de conexión al identificar', 'error');
+    }
+}
+
+function useIdentifiedSettings() {
+    if (!identifiedSignalData) {
+        showToast('No hay señal identificada', 'error');
+        return;
+    }
+
+    // Establecer la frecuencia detectada en el selector de captura
+    const freqSelect = document.getElementById('capture-frequency');
+    const customFreq = document.getElementById('custom-frequency');
+
+    // Buscar si la frecuencia está en las opciones predefinidas
+    const freqValue = identifiedSignalData.frequency.toString();
+    let found = false;
+    for (let option of freqSelect.options) {
+        if (option.value === freqValue || Math.abs(parseFloat(option.value) - identifiedSignalData.frequency) < 0.1) {
+            freqSelect.value = option.value;
+            found = true;
+            break;
+        }
+    }
+
+    if (!found) {
+        freqSelect.value = 'custom';
+        customFreq.style.display = 'block';
+        customFreq.value = identifiedSignalData.frequency;
+    }
+
+    // Establecer la modulación
+    const modSelect = document.getElementById('capture-modulation');
+    modSelect.value = identifiedSignalData.modulation.toString();
+
+    // Cambiar a la pestaña de Captura
+    document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(tab => tab.classList.remove('active'));
+
+    const captureTabBtn = document.querySelector('[data-tab="capture"]');
+    const captureTab = document.getElementById('capture-tab');
+    if (captureTabBtn) captureTabBtn.classList.add('active');
+    if (captureTab) captureTab.classList.add('active');
+
+    showToast(`Ajustes aplicados: ${identifiedSignalData.frequency} MHz, ${identifiedSignalData.modulation_name}`, 'success');
+}
+
+function clearIdentifyResult() {
+    identifiedSignalData = null;
+    document.getElementById('identify-result').style.display = 'none';
+    document.getElementById('btn-identify').style.display = 'block';
 }
 
 // ============================================
