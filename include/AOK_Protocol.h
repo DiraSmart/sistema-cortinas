@@ -13,14 +13,14 @@
 // Timing constants (microseconds)
 #define AOK_AGC1_PULSE      5300    // AGC HIGH pulse
 #define AOK_AGC2_PULSE      530     // AGC LOW pulse
-#define AOK_RADIO_SILENCE   5030    // Gap between repetitions
+#define AOK_RADIO_SILENCE   6000    // Gap between repetitions (6ms - original ~5ms)
 #define AOK_SHORT_PULSE     270     // Short pulse (bit component)
 #define AOK_LONG_PULSE      565     // Long pulse (bit component)
 
 // Protocol structure
 #define AOK_TOTAL_BITS      65      // Total bits per command
 #define AOK_START_BYTE      0xA3    // Fixed start byte
-#define AOK_REPEAT_COUNT    8       // Number of transmissions
+#define AOK_REPEAT_COUNT    12      // Number of transmissions (default)
 
 // Commands
 #define AOK_CMD_UP          0x0B    // Capturado del control original

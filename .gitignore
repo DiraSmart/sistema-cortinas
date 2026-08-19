@@ -60,3 +60,9 @@ secrets.h
 /data.bin
 /littlefs.bin
 /spiffs.bin
+
+# Respaldos de dispositivos: contienen credenciales WiFi/MQTT en claro
+backups/
+
+# Artefacto de redirecciones a NUL en Windows
+nul

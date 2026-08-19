@@ -5,6 +5,9 @@
 #include "DooyaBidir.h"
 #include "AOK_Protocol.h"
 
+// Reinicios por watchdog RF (definido en main.cpp)
+extern uint32_t rfWatchdogReboots;
+
 MQTTClientManager* MQTTClientManager::instance = nullptr;
 MQTTClientManager mqttClient;
 
@@ -63,6 +66,28 @@ void MQTTClientManager::setupTopics() {
     commandTopic = baseTopic + "/+/set";
     stateTopic = baseTopic + "/state";
     availabilityTopic = baseTopic + "/status";
+    rfAvailabilityTopic = baseTopic + "/rf_status";
+}
+
+// Las entidades controlables dependen de DOS disponibilidades:
+// el ESP32 conectado al broker (LWT) y el CC1101 respondiendo.
+// Si el módulo RF se cae, HA marca las cortinas como "no disponible".
+void MQTTClientManager::addDeviceAvailability(JsonDocument& doc) {
+    JsonArray avty = doc.createNestedArray("avty");
+
+    JsonObject mqttAvty = avty.createNestedObject();
+    mqttAvty["t"] = availabilityTopic;
+
+    JsonObject rfAvty = avty.createNestedObject();
+    rfAvty["t"] = rfAvailabilityTopic;
+
+    doc["avty_mode"] = "all";
+}
+
+void MQTTClientManager::publishRFStatus(bool rfOk) {
+    if (!mqtt.connected()) return;
+    mqtt.publish(rfAvailabilityTopic.c_str(), rfOk ? "online" : "offline", true);
+    Serial.printf("[MQTT] Estado RF publicado: %s\n", rfOk ? "online" : "offline");
 }
 
 bool MQTTClientManager::connect() {
@@ -99,6 +124,7 @@ bool MQTTClientManager::connect() {
 
         // Publicar disponibilidad
         mqtt.publish(availabilityTopic.c_str(), "online", true);
+        publishRFStatus(rfModule.isConnected());
 
         // Suscribirse a comandos
         subscribe();
@@ -246,8 +272,6 @@ void MQTTClientManager::processDeviceCommand(const char* deviceId, const char* c
     if (device.type == DEVICE_CURTAIN_SOMFY) {
         Serial.printf("[MQTT] Comando Somfy RTS para %s\n", device.name);
 
-        // Configurar el módulo RF para Somfy (433.42 MHz)
-        rfModule.setFrequency(SOMFY_FREQUENCY);
         somfyRTS.setRemote(&device.somfy);
 
         bool success = false;
@@ -416,6 +440,14 @@ void MQTTClientManager::processSystemCommand(const char* command, const char* pa
         mqtt.publish(availabilityTopic.c_str(), "offline", true);
         delay(500);
         ESP.restart();
+    } else if (cmd == "rf_watchdog") {
+        String val = String(payload);
+        val.toUpperCase();
+        bool enable = (val == "ON" || val == "1" || val == "TRUE");
+        sysConfig->rf_watchdog_enabled = enable;
+        storage.saveConfig(sysConfig);
+        Serial.printf("[MQTT] Watchdog RF %s\n", enable ? "activado" : "desactivado");
+        publishSystemStatus();
     }
 }
 
@@ -426,8 +458,10 @@ void MQTTClientManager::setCommandCallback(void (*callback)(const char* deviceId
 void MQTTClientManager::publishDeviceState(const char* deviceId, const char* state) {
     if (!mqtt.connected()) return;
 
-    String topic = baseTopic + "/" + String(deviceId) + "/state";
-    mqtt.publish(topic.c_str(), state, true);
+    // Publicar posición 50% para covers RF unidireccionales
+    // Así HA siempre muestra los 3 botones (abrir/cerrar/parar)
+    String posTopic = baseTopic + "/" + String(deviceId) + "/position";
+    mqtt.publish(posTopic.c_str(), "50", true);
 }
 
 void MQTTClientManager::publishAllStates() {
@@ -438,7 +472,24 @@ void MQTTClientManager::publishAllStates() {
 
     for (uint8_t i = 0; i < count; i++) {
         if (storage.getDeviceByIndex(i, &device)) {
-            publishDeviceState(device.id, "unknown");
+            // Publicar estado inicial según tipo de dispositivo
+            switch (device.type) {
+                case DEVICE_CURTAIN:
+                case DEVICE_CURTAIN_SOMFY:
+                case DEVICE_CURTAIN_DOOYA_BIDIR:
+                case DEVICE_CURTAIN_AOK:
+                case DEVICE_GATE:
+                    publishDeviceState(device.id, "stopped");
+                    break;
+                case DEVICE_SWITCH:
+                case DEVICE_LIGHT:
+                case DEVICE_FAN:
+                    publishDeviceState(device.id, "OFF");
+                    break;
+                default:
+                    publishDeviceState(device.id, "idle");
+                    break;
+            }
         }
     }
 }
@@ -454,8 +505,15 @@ void MQTTClientManager::publishSystemStatus() {
     doc["ip"] = WiFi.localIP().toString();
     doc["mac"] = WiFi.macAddress();
     doc["ssid"] = WiFi.SSID();
-    doc["rf_ok"] = rfModule.isConnected();
+    bool rfOk = rfModule.isConnected();
+    doc["rf_ok"] = rfOk;
     doc["freq"] = rfModule.getFrequency();
+    doc["rf_watchdog"] = sysConfig->rf_watchdog_enabled;
+    doc["rf_watchdog_min"] = sysConfig->rf_watchdog_minutes;
+    doc["rf_reboots"] = rfWatchdogReboots;
+
+    // Mantener fresco el topic de disponibilidad RF
+    mqtt.publish(rfAvailabilityTopic.c_str(), rfOk ? "online" : "offline", true);
 
     String payload;
     serializeJson(doc, payload);
@@ -483,6 +541,9 @@ void MQTTClientManager::publishDiscovery() {
 
     // Publish diagnostic sensors
     publishDiagnosticSensors();
+
+    // Switch para activar/desactivar el reinicio automático por fallo RF
+    publishRFWatchdogSwitch();
 
     // Cargar dispositivos uno a uno para evitar stack overflow
     uint8_t count = storage.getDeviceCount();
@@ -588,6 +649,62 @@ void MQTTClientManager::publishSystemButtons() {
 
 void MQTTClientManager::publishDiagnosticSensors() {
     String sysStateTopic = baseTopic + "/diagnostics";
+
+    // Estado del módulo RF (CC1101) - binary_sensor de conectividad
+    {
+        StaticJsonDocument<448> doc;
+        String uniqueId = String(sysConfig->mqtt_client_id) + "_rf_module";
+        String discoveryTopic = String(MQTT_DISCOVERY_PREFIX) + "/binary_sensor/" + uniqueId + "/config";
+
+        doc["name"] = "Modulo RF";
+        doc["uniq_id"] = uniqueId;
+        doc["stat_t"] = rfAvailabilityTopic;   // online/offline en tiempo real
+        doc["pl_on"] = "online";
+        doc["pl_off"] = "offline";
+        doc["dev_cla"] = "connectivity";
+        doc["ent_cat"] = "diagnostic";
+        doc["avty_t"] = availabilityTopic;     // solo depende del ESP32, no del RF
+
+        JsonObject dev = doc.createNestedObject("dev");
+        JsonArray ids = dev.createNestedArray("ids");
+        ids.add(sysConfig->mqtt_client_id);
+        dev["name"] = sysConfig->device_name;
+        dev["mf"] = "Dirasmart";
+        dev["sw"] = FIRMWARE_VERSION;
+
+        String payload;
+        serializeJson(doc, payload);
+        mqtt.publish(discoveryTopic.c_str(), payload.c_str(), true);
+    }
+    delay(30);
+
+    // Frecuencia RF actual
+    {
+        StaticJsonDocument<448> doc;
+        String uniqueId = String(sysConfig->mqtt_client_id) + "_rf_frequency";
+        String discoveryTopic = String(MQTT_DISCOVERY_PREFIX) + "/sensor/" + uniqueId + "/config";
+
+        doc["name"] = "Frecuencia RF";
+        doc["uniq_id"] = uniqueId;
+        doc["stat_t"] = sysStateTopic;
+        doc["val_tpl"] = "{{ value_json.freq }}";
+        doc["unit_of_meas"] = "MHz";
+        doc["ent_cat"] = "diagnostic";
+        doc["ic"] = "mdi:radio-tower";
+        doc["avty_t"] = availabilityTopic;
+
+        JsonObject dev = doc.createNestedObject("dev");
+        JsonArray ids = dev.createNestedArray("ids");
+        ids.add(sysConfig->mqtt_client_id);
+        dev["name"] = sysConfig->device_name;
+        dev["mf"] = "Dirasmart";
+        dev["sw"] = FIRMWARE_VERSION;
+
+        String payload;
+        serializeJson(doc, payload);
+        mqtt.publish(discoveryTopic.c_str(), payload.c_str(), true);
+    }
+    delay(30);
 
     // WiFi Signal Strength (RSSI)
     {
@@ -759,8 +876,39 @@ void MQTTClientManager::publishDiagnosticSensors() {
     Serial.println("[MQTT] Diagnostic sensors published");
 }
 
-void MQTTClientManager::publishCoverDiscovery(const SavedDevice* device) {
+void MQTTClientManager::publishRFWatchdogSwitch() {
     StaticJsonDocument<512> doc;
+    String uniqueId = String(sysConfig->mqtt_client_id) + "_rf_watchdog";
+    String discoveryTopic = String(MQTT_DISCOVERY_PREFIX) + "/switch/" + uniqueId + "/config";
+
+    doc["name"] = "Reinicio auto si falla RF";
+    doc["uniq_id"] = uniqueId;
+    doc["cmd_t"] = baseTopic + "/system/rf_watchdog";
+    doc["stat_t"] = baseTopic + "/diagnostics";
+    doc["val_tpl"] = "{{ 'ON' if value_json.rf_watchdog else 'OFF' }}";
+    doc["pl_on"] = "ON";
+    doc["pl_off"] = "OFF";
+    doc["ic"] = "mdi:restart-alert";
+    doc["ent_cat"] = "config";
+    doc["avty_t"] = availabilityTopic;
+
+    JsonObject dev = doc.createNestedObject("dev");
+    JsonArray ids = dev.createNestedArray("ids");
+    ids.add(sysConfig->mqtt_client_id);
+    dev["name"] = sysConfig->device_name;
+    dev["mf"] = "Dirasmart";
+    dev["sw"] = FIRMWARE_VERSION;
+
+    String payload;
+    serializeJson(doc, payload);
+    mqtt.publish(discoveryTopic.c_str(), payload.c_str(), true);
+    delay(30);
+
+    Serial.println("[MQTT] RF watchdog switch published");
+}
+
+void MQTTClientManager::publishCoverDiscovery(const SavedDevice* device) {
+    StaticJsonDocument<640> doc;
 
     String uniqueId = String(sysConfig->mqtt_client_id) + "_" + String(device->id);
     String discoveryTopic = String(MQTT_DISCOVERY_PREFIX) + "/cover/" + uniqueId + "/config";
@@ -769,11 +917,13 @@ void MQTTClientManager::publishCoverDiscovery(const SavedDevice* device) {
     doc["uniq_id"] = uniqueId;
     doc["dev_cla"] = "curtain";
     doc["cmd_t"] = baseTopic + "/" + String(device->id) + "/set";
-    doc["stat_t"] = baseTopic + "/" + String(device->id) + "/state";
-    doc["avty_t"] = availabilityTopic;
+    doc["pos_t"] = baseTopic + "/" + String(device->id) + "/position";
+    addDeviceAvailability(doc);
     doc["pl_open"] = "OPEN";
     doc["pl_cls"] = "CLOSE";
     doc["pl_stop"] = "STOP";
+    doc["pos_open"] = 100;
+    doc["pos_clsd"] = 0;
 
     JsonObject dev = doc.createNestedObject("dev");
     JsonArray ids = dev.createNestedArray("ids");
@@ -789,7 +939,7 @@ void MQTTClientManager::publishCoverDiscovery(const SavedDevice* device) {
 }
 
 void MQTTClientManager::publishGateDiscovery(const SavedDevice* device) {
-    StaticJsonDocument<512> doc;
+    StaticJsonDocument<640> doc;
 
     String uniqueId = String(sysConfig->mqtt_client_id) + "_" + String(device->id);
     String discoveryTopic = String(MQTT_DISCOVERY_PREFIX) + "/cover/" + uniqueId + "/config";
@@ -799,7 +949,7 @@ void MQTTClientManager::publishGateDiscovery(const SavedDevice* device) {
     doc["dev_cla"] = "garage";
     doc["cmd_t"] = baseTopic + "/" + String(device->id) + "/set";
     doc["stat_t"] = baseTopic + "/" + String(device->id) + "/state";
-    doc["avty_t"] = availabilityTopic;
+    addDeviceAvailability(doc);
     doc["pl_open"] = "TOGGLE";
     doc["pl_cls"] = "CLOSE";
     doc["pl_stop"] = "TOGGLE";
@@ -818,7 +968,7 @@ void MQTTClientManager::publishGateDiscovery(const SavedDevice* device) {
 }
 
 void MQTTClientManager::publishSwitchDiscovery(const SavedDevice* device) {
-    StaticJsonDocument<512> doc;
+    StaticJsonDocument<640> doc;
 
     String uniqueId = String(sysConfig->mqtt_client_id) + "_" + String(device->id);
     String discoveryTopic = String(MQTT_DISCOVERY_PREFIX) + "/switch/" + uniqueId + "/config";
@@ -827,7 +977,7 @@ void MQTTClientManager::publishSwitchDiscovery(const SavedDevice* device) {
     doc["uniq_id"] = uniqueId;
     doc["cmd_t"] = baseTopic + "/" + String(device->id) + "/set";
     doc["stat_t"] = baseTopic + "/" + String(device->id) + "/state";
-    doc["avty_t"] = availabilityTopic;
+    addDeviceAvailability(doc);
     doc["pl_on"] = "ON";
     doc["pl_off"] = "OFF";
 
@@ -845,7 +995,7 @@ void MQTTClientManager::publishSwitchDiscovery(const SavedDevice* device) {
 }
 
 void MQTTClientManager::publishButtonDiscovery(const SavedDevice* device, uint8_t signalIndex) {
-    StaticJsonDocument<448> doc;
+    StaticJsonDocument<640> doc;
 
     String uniqueId = String(sysConfig->mqtt_client_id) + "_" + String(device->id) + "_" + String(signalIndex);
     String discoveryTopic = String(MQTT_DISCOVERY_PREFIX) + "/button/" + uniqueId + "/config";
@@ -858,7 +1008,7 @@ void MQTTClientManager::publishButtonDiscovery(const SavedDevice* device, uint8_
     doc["name"] = String(device->name) + " - " + signalName;
     doc["uniq_id"] = uniqueId;
     doc["cmd_t"] = baseTopic + "/" + String(device->id) + "/" + String(signalIndex) + "/set";
-    doc["avty_t"] = availabilityTopic;
+    addDeviceAvailability(doc);
     doc["pl_prs"] = "PRESS";
 
     JsonObject dev = doc.createNestedObject("dev");

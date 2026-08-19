@@ -8,6 +8,18 @@
 
 WebServerManager webServer;
 
+// Estado del watchdog RF (definido en main.cpp)
+extern unsigned long rfDownSince;
+extern uint32_t rfWatchdogReboots;
+
+// Caché del último escaneo WiFi y roaming (definidos en main.cpp)
+extern ScannedAP scannedAPs[MAX_SCANNED_APS];
+extern uint8_t scannedAPCount;
+extern unsigned long lastScanTime;
+extern uint8_t currentBSSID[6];
+extern int wifiScanAndCache();
+extern void checkWiFiRoaming();
+
 WebServerManager::WebServerManager() {
     server = nullptr;
     tempCapturedSignal = nullptr;
@@ -256,6 +268,7 @@ void WebServerManager::setupRoutes() {
     server->on("/api/rf/test", HTTP_OPTIONS, [this]() { handleCORS(); server->send(204); });
     server->on("/api/signal/repeat", HTTP_OPTIONS, [this]() { handleCORS(); server->send(204); });
     server->on("/api/signal/invert", HTTP_OPTIONS, [this]() { handleCORS(); server->send(204); });
+    server->on("/api/aok/repeat", HTTP_OPTIONS, [this]() { handleCORS(); server->send(204); });
     server->on("/api/restore", HTTP_OPTIONS, [this]() { handleCORS(); server->send(204); });
     server->on("/api/wifi/connect", HTTP_OPTIONS, [this]() { handleCORS(); server->send(204); });
 
@@ -266,6 +279,7 @@ void WebServerManager::setupRoutes() {
     server->on("/api/devices", HTTP_GET, [this]() { handleGetDevices(); });
     server->on("/api/devices", HTTP_POST, [this]() { handleAddDevice(); });
     server->on("/api/devices/update", HTTP_POST, [this]() { handleUpdateDevice(); });
+    server->on("/api/devices/basic", HTTP_POST, [this]() { handleUpdateDeviceBasicInfo(); });
     server->on("/api/devices/delete", HTTP_GET, [this]() { handleDeleteDevice(); });
     server->on("/api/rf/transmit", HTTP_GET, [this]() { handleTransmitSignal(); });
     server->on("/api/rf/capture/start", HTTP_GET, [this]() { handleStartCapture(); });
@@ -276,6 +290,7 @@ void WebServerManager::setupRoutes() {
     server->on("/api/rf/test", HTTP_POST, [this]() { handleTestSignal(); });
     server->on("/api/signal/repeat", HTTP_POST, [this]() { handleUpdateSignalRepeat(); });
     server->on("/api/signal/invert", HTTP_POST, [this]() { handleUpdateSignalInvert(); });
+    server->on("/api/aok/repeat", HTTP_POST, [this]() { handleUpdateAokRepeat(); });
     server->on("/api/rf/frequency", HTTP_GET, [this]() { handleSetFrequency(); });
     server->on("/api/rf/scan", HTTP_GET, [this]() { handleScanFrequency(); });
     server->on("/api/rf/identify", HTTP_GET, [this]() { handleIdentifySignal(); });
@@ -283,6 +298,8 @@ void WebServerManager::setupRoutes() {
     server->on("/api/backup", HTTP_GET, [this]() { handleBackup(); });
     server->on("/api/restore", HTTP_POST, [this]() { handleRestore(); });
     server->on("/api/wifi/scan", HTTP_GET, [this]() { handleWiFiScan(); });
+    server->on("/api/wifi/aps", HTTP_GET, [this]() { handleWiFiAPs(); });
+    server->on("/api/wifi/roam", HTTP_GET, [this]() { handleWiFiRoam(); });
     server->on("/api/wifi/connect", HTTP_POST, [this]() { handleWiFiConnect(); });
     server->on("/api/mqtt/rediscover", HTTP_POST, [this]() { handleMqttRediscover(); });
     server->on("/api/reboot", HTTP_GET, [this]() { handleReboot(); });
@@ -343,6 +360,12 @@ void WebServerManager::handleGetStatus() {
     doc["rf_connected"] = rfConnected;
     doc["rf_frequency"] = rfConnected ? round(rfModule.getFrequency() * 100) / 100.0 : 0;
     doc["rf_capturing"] = rfConnected ? rfModule.isCapturing() : false;
+    doc["rf_down_seconds"] = (!rfConnected && rfDownSince != 0) ? (millis() - rfDownSince) / 1000 : 0;
+    if (sysConfig) {
+        doc["rf_watchdog_enabled"] = sysConfig->rf_watchdog_enabled;
+        doc["rf_watchdog_minutes"] = sysConfig->rf_watchdog_minutes;
+    }
+    doc["rf_watchdog_reboots"] = rfWatchdogReboots;
     doc["free_heap"] = ESP.getFreeHeap();
     doc["uptime"] = millis() / 1000;
     doc["ota_url"] = "http://" + getIPAddress() + "/update";
@@ -368,6 +391,9 @@ void WebServerManager::handleGetConfig() {
     doc["timezone"] = sysConfig->timezone;
     doc["device_name"] = sysConfig->device_name;
     doc["default_frequency"] = sysConfig->default_frequency;
+    doc["auto_detect_enabled"] = sysConfig->auto_detect_enabled;
+    doc["rf_watchdog_enabled"] = sysConfig->rf_watchdog_enabled;
+    doc["rf_watchdog_minutes"] = sysConfig->rf_watchdog_minutes;
 
     String response;
     serializeJson(doc, response);
@@ -443,6 +469,18 @@ void WebServerManager::handleSaveConfig() {
     }
     if (doc.containsKey("default_frequency")) {
         sysConfig->default_frequency = doc["default_frequency"];
+    }
+    if (doc.containsKey("auto_detect_enabled")) {
+        sysConfig->auto_detect_enabled = doc["auto_detect_enabled"];
+    }
+    if (doc.containsKey("rf_watchdog_enabled")) {
+        sysConfig->rf_watchdog_enabled = doc["rf_watchdog_enabled"];
+    }
+    if (doc.containsKey("rf_watchdog_minutes")) {
+        uint16_t minutes = doc["rf_watchdog_minutes"] | RF_WATCHDOG_DEFAULT_MIN;
+        if (minutes < 1) minutes = 1;
+        if (minutes > 1440) minutes = 1440;
+        sysConfig->rf_watchdog_minutes = minutes;
     }
 
     if (storage.saveConfig(sysConfig)) {
@@ -529,6 +567,8 @@ void WebServerManager::handleAddDevice() {
         device.aok.remoteId = doc["aok_remote_id"] | 0;
         // Channel 0 is valid (group control), so check if key exists before defaulting
         device.aok.channel = doc.containsKey("aok_channel") ? (uint8_t)doc["aok_channel"].as<int>() : 1;
+        // RepeatCount: default 12 si no se especifica
+        device.aok.repeatCount = doc["aok_repeat_count"] | 12;
     }
 
     if (storage.addDevice(&device)) {
@@ -589,8 +629,53 @@ void WebServerManager::handleUpdateDevice() {
     if (doc.containsKey("dooya_unit_code")) device.dooyaBidir.unitCode = doc["dooya_unit_code"];
     if (doc.containsKey("aok_remote_id")) device.aok.remoteId = doc["aok_remote_id"];
     if (doc.containsKey("aok_channel")) device.aok.channel = doc["aok_channel"];
+    if (doc.containsKey("aok_repeat_count")) {
+        int repeat = doc["aok_repeat_count"].as<int>();
+        if (repeat < 1) repeat = 1;
+        if (repeat > 20) repeat = 20;
+        device.aok.repeatCount = repeat;
+    }
 
     if (storage.updateDevice(id, &device)) {
+        sendJsonResponse(200, "{\"success\":true,\"message\":\"Dispositivo actualizado\"}");
+    } else {
+        sendJsonError(500, "Error al actualizar dispositivo");
+    }
+}
+
+void WebServerManager::handleUpdateDeviceBasicInfo() {
+    handleCORS();
+    if (!checkAuth()) return;
+
+    if (!server->hasArg("plain")) {
+        sendJsonError(400, "No data received");
+        return;
+    }
+
+    String body = server->arg("plain");
+    StaticJsonDocument<512> doc;
+    DeserializationError error = deserializeJson(doc, body);
+
+    if (error) {
+        sendJsonError(400, "Invalid JSON");
+        return;
+    }
+
+    const char* id = doc["id"] | "";
+    const char* name = doc["name"] | "";
+    const char* room = doc["room"] | "";
+
+    if (strlen(id) == 0) {
+        sendJsonError(400, "Device ID required");
+        return;
+    }
+
+    if (strlen(name) == 0) {
+        sendJsonError(400, "Device name required");
+        return;
+    }
+
+    if (storage.updateDeviceBasicInfo(id, name, room)) {
         sendJsonResponse(200, "{\"success\":true,\"message\":\"Dispositivo actualizado\"}");
     } else {
         sendJsonError(500, "Error al actualizar dispositivo");
@@ -655,8 +740,7 @@ void WebServerManager::handleTransmitSignal() {
         bool success = somfyRTS.sendCommand(cmd);
 
         if (success) {
-            device.somfy.rollingCode++;
-            storage.updateSomfyRollingCode(deviceId.c_str(), device.somfy.rollingCode);
+            storage.updateSomfyRollingCode(deviceId.c_str(), somfyRTS.getRollingCode());
             sendJsonResponse(200, "{\"success\":true,\"message\":\"Comando Somfy enviado\"}");
         } else {
             sendJsonError(500, "Error al enviar comando Somfy");
@@ -706,7 +790,10 @@ void WebServerManager::handleTransmitSignal() {
         else if (signalIndex == 2) cmd = AOK_CMD_STOP;
         else if (signalIndex == 3) cmd = AOK_CMD_PROGRAM;
 
-        bool success = aokProtocol.sendCommand(cmd);
+        // Usar repeatCount del dispositivo (default 8 si no está configurado)
+        int repeats = device.aok.repeatCount > 0 ? device.aok.repeatCount : 8;
+        Serial.printf("[Web] A-OK: cmd=%d, repeats=%d\n", cmd, repeats);
+        bool success = aokProtocol.sendCommand(cmd, repeats);
 
         if (success) {
             sendJsonResponse(200, "{\"success\":true,\"message\":\"Comando A-OK enviado\"}");
@@ -1108,6 +1195,44 @@ void WebServerManager::handleUpdateSignalInvert() {
     }
 }
 
+void WebServerManager::handleUpdateAokRepeat() {
+    handleCORS();
+
+    if (!server->hasArg("plain")) {
+        sendJsonError(400, "No data received");
+        return;
+    }
+
+    String body = server->arg("plain");
+    StaticJsonDocument<256> doc;
+    DeserializationError error = deserializeJson(doc, body);
+
+    if (error) {
+        sendJsonError(400, "Invalid JSON");
+        return;
+    }
+
+    const char* deviceId = doc["deviceId"] | "";
+    int repeatCount = doc["repeatCount"] | 12;
+
+    if (strlen(deviceId) == 0) {
+        sendJsonError(400, "Device ID required");
+        return;
+    }
+
+    // Clamp repeat count
+    if (repeatCount < 1) repeatCount = 1;
+    if (repeatCount > 20) repeatCount = 20;
+
+    // Update A-OK repeat count directly in JSON
+    if (storage.updateAokRepeatCount(deviceId, repeatCount)) {
+        Serial.printf("[Web] A-OK repeat updated: device=%s, repeat=%d\n", deviceId, repeatCount);
+        sendJsonResponse(200, "{\"success\":true}");
+    } else {
+        sendJsonError(500, "Error updating A-OK repeat count");
+    }
+}
+
 void WebServerManager::handleSetFrequency() {
     handleCORS();
 
@@ -1409,6 +1534,72 @@ void WebServerManager::handleWiFiScan() {
     }
 
     WiFi.scanDelete();
+
+    String response;
+    serializeJson(doc, response);
+    sendJsonResponse(200, response);
+}
+
+// Devuelve las antenas que vio el ESP32 en el último escaneo (o fuerza uno con
+// ?refresh=1). A diferencia de /api/wifi/scan NO desconecta la WiFi, así que la
+// respuesta llega por la misma conexión que hizo la petición.
+void WebServerManager::handleWiFiAPs() {
+    handleCORS();
+
+    bool refresh = server->hasArg("refresh") && server->arg("refresh") == "1";
+    if (refresh || scannedAPCount == 0) {
+        wifiScanAndCache();
+    }
+
+    DynamicJsonDocument doc(3072);
+    doc["connected_ssid"] = WiFi.SSID();
+    doc["current_rssi"] = WiFi.RSSI();
+    doc["current_channel"] = WiFi.channel();
+    doc["scan_age_seconds"] = lastScanTime > 0 ? (millis() - lastScanTime) / 1000 : 0;
+    doc["weak_threshold"] = WIFI_WEAK_RSSI;
+
+    char bssidStr[18];
+    snprintf(bssidStr, sizeof(bssidStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+        currentBSSID[0], currentBSSID[1], currentBSSID[2],
+        currentBSSID[3], currentBSSID[4], currentBSSID[5]);
+    doc["current_bssid"] = bssidStr;
+
+    JsonArray aps = doc.createNestedArray("aps");
+    for (uint8_t i = 0; i < scannedAPCount; i++) {
+        JsonObject ap = aps.createNestedObject();
+        ap["ssid"] = scannedAPs[i].ssid;
+        ap["rssi"] = scannedAPs[i].rssi;
+        ap["channel"] = scannedAPs[i].channel;
+
+        snprintf(bssidStr, sizeof(bssidStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+            scannedAPs[i].bssid[0], scannedAPs[i].bssid[1], scannedAPs[i].bssid[2],
+            scannedAPs[i].bssid[3], scannedAPs[i].bssid[4], scannedAPs[i].bssid[5]);
+        ap["bssid"] = bssidStr;
+        ap["current"] = (memcmp(scannedAPs[i].bssid, currentBSSID, 6) == 0);
+    }
+
+    String response;
+    serializeJson(doc, response);
+    sendJsonResponse(200, response);
+}
+
+// Fuerza una evaluación de roaming ahora mismo (sin esperar al intervalo)
+void WebServerManager::handleWiFiRoam() {
+    handleCORS();
+
+    if (WiFi.status() != WL_CONNECTED) {
+        sendJsonError(400, "WiFi no conectado");
+        return;
+    }
+
+    int8_t before = WiFi.RSSI();
+    checkWiFiRoaming();
+
+    StaticJsonDocument<256> doc;
+    doc["rssi_before"] = before;
+    doc["rssi_after"] = WiFi.RSSI();
+    doc["ssid"] = WiFi.SSID();
+    doc["changed"] = WiFi.RSSI() != before;
 
     String response;
     serializeJson(doc, response);

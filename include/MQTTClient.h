@@ -31,6 +31,9 @@ public:
     void publishAllStates();
     void publishSystemStatus();
 
+    // Disponibilidad del módulo RF (hace que las cortinas salgan "no disponible" en HA)
+    void publishRFStatus(bool rfOk);
+
     // Callbacks
     void setCommandCallback(void (*callback)(const char* deviceId, const char* command));
 
@@ -50,9 +53,11 @@ private:
     String commandTopic;
     String stateTopic;
     String availabilityTopic;
+    String rfAvailabilityTopic;
 
     // Métodos internos
     void setupTopics();
+    void addDeviceAvailability(JsonDocument& doc);  // avty: MQTT online + RF ok
     void subscribe();
     void handleMessage(char* topic, uint8_t* payload, unsigned int length);
     static void mqttCallback(char* topic, uint8_t* payload, unsigned int length);
@@ -61,6 +66,7 @@ private:
     void processSystemCommand(const char* command, const char* payload);
     void publishSystemButtons();
     void publishDiagnosticSensors();
+    void publishRFWatchdogSwitch();
 
     // Home Assistant Discovery
     void publishCoverDiscovery(const SavedDevice* device);

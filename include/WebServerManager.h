@@ -63,6 +63,7 @@ private:
     void handleGetDevices();
     void handleAddDevice();
     void handleUpdateDevice();
+    void handleUpdateDeviceBasicInfo();
     void handleDeleteDevice();
     void handleTransmitSignal();
     void handleStartCapture();
@@ -73,6 +74,7 @@ private:
     void handleTestSignal();
     void handleUpdateSignalRepeat();
     void handleUpdateSignalInvert();
+    void handleUpdateAokRepeat();
     void handleSetFrequency();
     void handleScanFrequency();
     void handleIdentifySignal();
@@ -80,6 +82,8 @@ private:
     void handleBackup();
     void handleRestore();
     void handleWiFiScan();
+    void handleWiFiAPs();      // Antenas vistas, sin desconectar la WiFi
+    void handleWiFiRoam();     // Forzar búsqueda de mejor antena
     void handleWiFiConnect();
     void handleMqttRediscover();
     void handleReboot();

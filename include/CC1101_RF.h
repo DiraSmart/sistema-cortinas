@@ -53,6 +53,7 @@ private:
     int currentModulation;
     bool capturing;
     bool connected;
+    uint8_t failedProbes;   // lecturas SPI fallidas consecutivas
 
     // Buffer para captura raw
     volatile uint8_t captureBuffer[RF_MAX_SIGNAL_LENGTH];

@@ -9,6 +9,7 @@ CC1101_RF::CC1101_RF() {
     currentModulation = 2; // ASK/OOK
     capturing = false;
     connected = false;
+    failedProbes = 0;
     captureIndex = 0;
     lastPulse = 0;
     captureComplete = false;
@@ -28,6 +29,7 @@ bool CC1101_RF::begin() {
     if (ELECHOUSE_cc1101.getCC1101()) {
         Serial.println("[RF] CC1101 conectado!");
         connected = true;
+        failedProbes = 0;
 
         // Configuración inicial
         ELECHOUSE_cc1101.Init();
@@ -56,15 +58,35 @@ bool CC1101_RF::begin() {
 bool CC1101_RF::isConnected() {
     if (!connected) return false;
 
-    // Verificar que el módulo realmente responda (evitar "invalid header: 0xffffff")
-    // Esto detecta si el módulo se desconectó después de inicializar
-    if (!ELECHOUSE_cc1101.getCC1101()) {
-        Serial.println("[RF] WARNING: CC1101 no responde, marcando como desconectado");
-        connected = false;
-        return false;
+    // Durante una captura el ISR de GDO0 dispara a alta frecuencia y una lectura
+    // SPI puede salir corrupta: no interrogar al módulo en ese momento.
+    if (capturing) return true;
+
+    // Verificar que el módulo realmente responda (evitar "invalid header: 0xffffff").
+    // El registro de estado del CC1101 puede devolver un valor corrupto de forma
+    // puntual (colisión con una actualización interna del chip), así que se
+    // reintenta la lectura antes de dar el módulo por caído. Sin esto, un único
+    // fallo de lectura dejaba el módulo marcado como desconectado para siempre
+    // y solo se recuperaba reiniciando el ESP32.
+    for (uint8_t i = 0; i < 3; i++) {
+        if (ELECHOUSE_cc1101.getCC1101()) {
+            failedProbes = 0;
+            return true;
+        }
+        delayMicroseconds(500);
     }
 
-    return true;
+    // Tres lecturas seguidas fallidas: puede seguir siendo un fallo transitorio,
+    // se exige que se repita en varias verificaciones antes de marcarlo caído.
+    failedProbes++;
+    if (failedProbes < 3) {
+        Serial.printf("[RF] WARNING: CC1101 no respondio (intento %d/3)\n", failedProbes);
+        return true;
+    }
+
+    Serial.println("[RF] WARNING: CC1101 no responde, marcando como desconectado");
+    connected = false;
+    return false;
 }
 
 void CC1101_RF::setFrequency(float freq) {

@@ -15,6 +15,7 @@
             <div class="header-brand">
                 <img src="img/dirasmart-logo.png" alt="Dirasmart" class="header-logo">
                 <h1>RF Controller</h1>
+                <span id="fw-version" class="fw-version">--</span>
             </div>
             <div class="status-bar">
                 <span id="wifi-status" class="status-indicator">WiFi: --</span>
@@ -98,13 +99,16 @@
                                 <div class="frequency-selector">
                                     <select id="capture-frequency">
                                         <option value="433.92">433.92 MHz (Europa/Latam)</option>
+                                        <option value="433.42">433.42 MHz (Somfy RTS)</option>
+                                        <option value="434.00">434.00 MHz</option>
                                         <option value="315.00">315.00 MHz (USA/Asia)</option>
-                                        <option value="868.00">868.00 MHz (Europa)</option>
                                         <option value="300.00">300.00 MHz</option>
                                         <option value="303.87">303.87 MHz</option>
                                         <option value="310.00">310.00 MHz</option>
                                         <option value="390.00">390.00 MHz</option>
                                         <option value="418.00">418.00 MHz</option>
+                                        <option value="868.00">868.00 MHz (Europa)</option>
+                                        <option value="868.35">868.35 MHz</option>
                                         <option value="915.00">915.00 MHz (USA)</option>
                                         <option value="custom">Personalizada...</option>
                                     </select>
@@ -340,15 +344,33 @@
                         <div class="form-group">
                             <label>Frecuencia por defecto</label>
                             <select id="default-frequency">
-                                <option value="433.92">433.92 MHz</option>
-                                <option value="315.00">315.00 MHz</option>
-                                <option value="868.00">868.00 MHz</option>
+                                <option value="433.92">433.92 MHz (Europa/Latam)</option>
+                                <option value="433.42">433.42 MHz (Somfy RTS)</option>
+                                <option value="434.00">434.00 MHz</option>
+                                <option value="315.00">315.00 MHz (USA/Asia)</option>
+                                <option value="300.00">300.00 MHz</option>
+                                <option value="303.87">303.87 MHz</option>
+                                <option value="310.00">310.00 MHz</option>
+                                <option value="390.00">390.00 MHz</option>
+                                <option value="418.00">418.00 MHz</option>
+                                <option value="868.00">868.00 MHz (Europa)</option>
+                                <option value="868.35">868.35 MHz</option>
+                                <option value="915.00">915.00 MHz (USA)</option>
                             </select>
                         </div>
                         <div class="form-group">
                             <label>
                                 <input type="checkbox" id="auto-detect-enabled" checked> Detección automática habilitada
                             </label>
+                        </div>
+                        <div class="form-group">
+                            <label>
+                                <input type="checkbox" id="rf-watchdog-enabled" checked> Reiniciar automáticamente si el módulo RF no responde
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label>Minutos sin RF antes de reiniciar</label>
+                            <input type="number" id="rf-watchdog-minutes" min="1" max="1440" value="15">
                         </div>
                     </div>
 
@@ -360,6 +382,7 @@
                             <input type="text" id="device-name" value="RF_Controller">
                         </div>
                         <div class="system-info">
+                            <p><strong>Firmware:</strong> <span id="system-version">--</span></p>
                             <p><strong>IP:</strong> <span id="system-ip">--</span></p>
                             <p><strong>Uptime:</strong> <span id="system-uptime">--</span></p>
                             <p><strong>Memoria libre:</strong> <span id="system-heap">--</span></p>

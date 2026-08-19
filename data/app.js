@@ -110,7 +110,12 @@ function updateStatusIndicators(data) {
     }
 
     if (rfStatus) {
-        rfStatus.textContent = data.rf_connected ? `RF: ${data.rf_frequency} MHz` : 'RF: No conectado';
+        if (data.rf_connected) {
+            rfStatus.textContent = `RF: ${data.rf_frequency} MHz`;
+        } else {
+            const downMin = Math.floor((data.rf_down_seconds || 0) / 60);
+            rfStatus.textContent = downMin > 0 ? `RF: No conectado (${downMin} min)` : 'RF: No conectado';
+        }
         rfStatus.className = 'status-indicator ' + (data.rf_connected ? 'connected' : 'disconnected');
     }
 
@@ -118,6 +123,12 @@ function updateStatusIndicators(data) {
     const sysIp = document.getElementById('system-ip');
     const sysUptime = document.getElementById('system-uptime');
     const sysHeap = document.getElementById('system-heap');
+
+    const version = data.version ? 'v' + data.version : '--';
+    const fwVersion = document.getElementById('fw-version');
+    const sysVersion = document.getElementById('system-version');
+    if (fwVersion) fwVersion.textContent = version;
+    if (sysVersion) sysVersion.textContent = version;
 
     if (sysIp) sysIp.textContent = data.ip || '--';
     if (sysUptime) sysUptime.textContent = formatUptime(data.uptime);
@@ -211,6 +222,11 @@ function renderDevices() {
                 `).join('');
         }
 
+        // Export button for A-OK devices
+        const exportButton = device.type === 12 ? `
+            <button class="btn-export" onclick="exportAokConfig('${device.id}')" title="Exportar para ESPHome">⬇️</button>
+        ` : '';
+
         return `
             <div class="device-card" data-id="${device.id}">
                 <div class="device-card-header">
@@ -224,6 +240,7 @@ function renderDevices() {
                 </div>
                 <div class="device-actions">
                     <button onclick="editDevice('${device.id}')">Editar</button>
+                    ${exportButton}
                 </div>
             </div>
         `;
@@ -475,12 +492,22 @@ function renderDeviceSignals(device) {
         // A-OK AC114
         const remoteId = device.aok?.remoteId || 0;
         const channel = device.aok?.channel ?? 1;
+        const repeatCount = device.aok?.repeatCount || 12;
         const channelDisplay = channel === 0 ? '0 (Grupo - Todas las cortinas)' : channel;
         container.innerHTML = `
             <div class="protocol-info">
                 <h4>A-OK AC114 - Control Virtual</h4>
                 <p><strong>Remote ID:</strong> ${remoteId.toString(16).toUpperCase().padStart(6, '0')}</p>
                 <p><strong>Canal:</strong> ${channelDisplay}</p>
+
+                <div class="signal-slot-repeat" style="margin: 15px 0;">
+                    <label><strong>Repeticiones:</strong></label>
+                    <input type="number" class="repeat-input" id="aok-repeat-${device.id}"
+                           value="${repeatCount}" min="1" max="20"
+                           onchange="updateAokRepeatCount('${device.id}', this.value)"
+                           style="width: 60px; margin-left: 10px;">
+                    <span style="color: #888; font-size: 0.9em; margin-left: 10px;">(1-20)</span>
+                </div>
 
                 <div class="pairing-instructions">
                     <h5>Para vincular con tu motor:</h5>
@@ -584,7 +611,6 @@ function goToCaptureForSignal(deviceId, signalIndex, signalName) {
 async function updateDevice() {
     const id = document.getElementById('edit-device-id').value;
     const name = document.getElementById('edit-device-name').value.trim();
-    const type = parseInt(document.getElementById('edit-device-type').value);
     const room = document.getElementById('edit-device-room').value.trim();
 
     if (!name) {
@@ -593,10 +619,12 @@ async function updateDevice() {
     }
 
     try {
-        const response = await fetch('/api/devices/update', {
+        // Usar endpoint seguro que solo actualiza nombre y room
+        // sin tocar la configuración del protocolo (A-OK, Somfy, etc.)
+        const response = await fetch('/api/devices/basic', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id, name, type, room })
+            body: JSON.stringify({ id, name, room })
         });
 
         const data = await response.json();
@@ -669,6 +697,38 @@ async function updateSignalRepeat(deviceId, signalIndex, repeatCount) {
         }
     } catch (error) {
         console.error('Error updating repeat count:', error);
+        showToast('Error de conexión', 'error');
+    }
+}
+
+// Actualizar repeticiones de A-OK
+async function updateAokRepeatCount(deviceId, repeatCount) {
+    repeatCount = Math.max(1, Math.min(20, parseInt(repeatCount) || 12));
+
+    try {
+        // Usar endpoint específico para A-OK para evitar pérdida de configuración
+        const response = await fetch('/api/aok/repeat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                deviceId: deviceId,
+                repeatCount: repeatCount
+            })
+        });
+
+        const data = await response.json();
+        if (data.success) {
+            showToast(`Repeticiones A-OK actualizadas a ${repeatCount}`, 'success');
+            // Update local cache
+            const device = devices.find(d => d.id === deviceId);
+            if (device && device.aok) {
+                device.aok.repeatCount = repeatCount;
+            }
+        } else {
+            showToast(data.error || 'Error al actualizar', 'error');
+        }
+    } catch (error) {
+        console.error('Error updating A-OK repeat count:', error);
         showToast('Error de conexión', 'error');
     }
 }
@@ -1318,6 +1378,196 @@ async function createAOKDevice(remoteIdHex, channel) {
     }
 }
 
+// Exportar configuración A-OK para ESPHome
+function exportAokConfig(deviceId) {
+    const device = devices.find(d => d.id === deviceId);
+    if (!device || device.type !== 12) {
+        showToast('Dispositivo A-OK no encontrado', 'error');
+        return;
+    }
+
+    const remoteId = device.aok?.remoteId || 0;
+    const channel = device.aok?.channel ?? 1;
+    const repeatCount = device.aok?.repeatCount || 12;
+    const remoteIdHex = remoteId.toString(16).toUpperCase().padStart(6, '0');
+    const deviceName = device.name.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+
+    // A-OK Protocol timing constants (microseconds)
+    const SHORT_PULSE = 270;
+    const LONG_PULSE = 565;
+    const AGC_HIGH = 5300;
+    const AGC_LOW = 530;
+
+    // Calculate channel address
+    function getChannelAddress(ch) {
+        if (ch === 0) return 0x3F00;  // Group - all channels
+        return 1 << (ch - 1);
+    }
+
+    // Calculate checksum (sum of all bytes, truncated to 8 bits)
+    function calculateChecksum(id, address, command) {
+        let sum = 0;
+        sum += (id >> 16) & 0xFF;
+        sum += (id >> 8) & 0xFF;
+        sum += id & 0xFF;
+        sum += (address >> 8) & 0xFF;
+        sum += address & 0xFF;
+        sum += command;
+        return sum & 0xFF;
+    }
+
+    // Build 8-byte frame
+    function buildFrame(command) {
+        const address = getChannelAddress(channel);
+        const checksum = calculateChecksum(remoteId, address, command);
+        return [
+            0xA3,                           // Start byte
+            (remoteId >> 16) & 0xFF,        // Remote ID high
+            (remoteId >> 8) & 0xFF,         // Remote ID mid
+            remoteId & 0xFF,                // Remote ID low
+            (address >> 8) & 0xFF,          // Address high
+            address & 0xFF,                 // Address low
+            command,                        // Command
+            checksum                        // Checksum
+        ];
+    }
+
+    // Convert frame to raw timing array for ESPHome
+    // Bit 0: SHORT high, LONG low -> [270, -565]
+    // Bit 1: LONG high, SHORT low -> [565, -270]
+    function frameToRawTiming(frame) {
+        const timing = [];
+
+        // AGC preamble
+        timing.push(AGC_HIGH);
+        timing.push(-AGC_LOW);
+
+        // Encode each byte (MSB first)
+        for (let byteIdx = 0; byteIdx < 8; byteIdx++) {
+            const byte = frame[byteIdx];
+            for (let bitIdx = 7; bitIdx >= 0; bitIdx--) {
+                const bit = (byte >> bitIdx) & 1;
+                if (bit === 1) {
+                    timing.push(LONG_PULSE);
+                    timing.push(-SHORT_PULSE);
+                } else {
+                    timing.push(SHORT_PULSE);
+                    timing.push(-LONG_PULSE);
+                }
+            }
+        }
+
+        // Trailing bit (always 1)
+        timing.push(LONG_PULSE);
+        timing.push(-SHORT_PULSE);
+
+        return timing;
+    }
+
+    // Generate raw codes for each command
+    const cmdUp = buildFrame(0x11);
+    const cmdDown = buildFrame(0x33);
+    const cmdStop = buildFrame(0x55);
+    const cmdProg = buildFrame(0xCC);
+
+    const rawUp = frameToRawTiming(cmdUp);
+    const rawDown = frameToRawTiming(cmdDown);
+    const rawStop = frameToRawTiming(cmdStop);
+    const rawProg = frameToRawTiming(cmdProg);
+
+    // Format timing array for YAML (compact, 80 chars per line max)
+    function formatTimingArray(arr, indent = '          ') {
+        const lines = [];
+        let line = indent + 'code: [';
+        for (let i = 0; i < arr.length; i++) {
+            const val = arr[i].toString();
+            if (line.length + val.length + 2 > 100) {
+                lines.push(line);
+                line = indent + '       ' + val;
+            } else {
+                line += (i === 0 ? '' : ', ') + val;
+            }
+        }
+        line += ']';
+        lines.push(line);
+        return lines.join('\n');
+    }
+
+    // Frame bytes as hex string
+    const frameUpHex = cmdUp.map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' ');
+    const frameDownHex = cmdDown.map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' ');
+    const frameStopHex = cmdStop.map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' ');
+    const frameProgHex = cmdProg.map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' ');
+
+    // Generar configuración para ESPHome con códigos RAW reales
+    const esphomeYaml = `# ============================================
+# A-OK AC114 Configuration for ESPHome
+# Device: ${device.name}
+# Exported from RF Controller
+# ============================================
+#
+# Remote ID: 0x${remoteIdHex} (${remoteId})
+# Channel: ${channel}${channel === 0 ? ' (Group - all)' : ''}
+# Repeat Count: ${repeatCount}
+#
+# Frame bytes (hex):
+#   UP:   ${frameUpHex}
+#   DOWN: ${frameDownHex}
+#   STOP: ${frameStopHex}
+#   PROG: ${frameProgHex}
+
+# Required: Configure remote_transmitter
+remote_transmitter:
+  pin: GPIO12  # Change to your TX pin
+  carrier_duty_percent: 100%
+
+cover:
+  - platform: template
+    name: '${device.name}'
+    id: ${deviceName}
+    device_class: shade
+    open_action:
+      - remote_transmitter.transmit_raw:
+${formatTimingArray(rawUp, '          ')}
+          repeat:
+            times: ${repeatCount}
+    close_action:
+      - remote_transmitter.transmit_raw:
+${formatTimingArray(rawDown, '          ')}
+          repeat:
+            times: ${repeatCount}
+    stop_action:
+      - remote_transmitter.transmit_raw:
+${formatTimingArray(rawStop, '          ')}
+          repeat:
+            times: ${repeatCount}
+
+# Button for programming mode
+button:
+  - platform: template
+    name: '${device.name} Programar'
+    id: ${deviceName}_prog
+    on_press:
+      - remote_transmitter.transmit_raw:
+${formatTimingArray(rawProg, '          ')}
+          repeat:
+            times: ${repeatCount}
+`;
+
+    // Descargar como archivo
+    const blob = new Blob([esphomeYaml], { type: 'text/yaml' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `aok_${deviceName}_${remoteIdHex}.yaml`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    showToast('Configuración A-OK exportada', 'success');
+}
+
 // ============================================
 // Configuración
 // ============================================
@@ -1357,6 +1607,8 @@ async function loadConfig() {
             document.getElementById('default-frequency').value = config.default_frequency;
         }
         document.getElementById('auto-detect-enabled').checked = config.auto_detect_enabled !== false;
+        document.getElementById('rf-watchdog-enabled').checked = config.rf_watchdog_enabled !== false;
+        document.getElementById('rf-watchdog-minutes').value = config.rf_watchdog_minutes || 15;
 
         // Sistema
         document.getElementById('device-name').value = config.device_name || 'RF_Controller';
@@ -1378,6 +1630,8 @@ async function saveConfig() {
         ntp_server: document.getElementById('ntp-server').value,
         default_frequency: parseFloat(document.getElementById('default-frequency').value),
         auto_detect_enabled: document.getElementById('auto-detect-enabled').checked,
+        rf_watchdog_enabled: document.getElementById('rf-watchdog-enabled').checked,
+        rf_watchdog_minutes: parseInt(document.getElementById('rf-watchdog-minutes').value) || 15,
         device_name: document.getElementById('device-name').value
     };
 

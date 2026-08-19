@@ -9,7 +9,7 @@ public:
     SomfyRTS();
 
     // Inicialización
-    bool begin(uint8_t txPin);
+    bool begin();
 
     // Configurar control remoto virtual
     void setRemote(uint32_t address, uint16_t rollingCode = 0, uint8_t encryptionKey = 0xA7);
@@ -33,7 +33,6 @@ public:
     String getStatusString();
 
 private:
-    uint8_t txPin;
     uint32_t remoteAddress;
     uint16_t currentRollingCode;
     uint8_t encryptionKey;
@@ -41,6 +40,10 @@ private:
 
     // Frame buffer
     uint8_t frameBuffer[SOMFY_FRAME_LENGTH];
+
+    // Configuración CC1101
+    void configureTransmitter();
+    void restoreConfig();
 
     // Métodos internos
     void buildFrame(uint8_t command);

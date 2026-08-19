@@ -156,7 +156,20 @@ pio device monitor         # Monitor serial
 
 ## Historial de Cambios
 
-### v1.2.1 (actual)
+### v1.2.3-vicsons (actual)
+- Disponibilidad RF en Home Assistant: cortinas/switches/botones usan `avty` doble
+  (broker MQTT + topic `rf_controller/{id}/rf_status`) con `avty_mode: all`,
+  así salen "no disponible" si el CC1101 deja de responder
+- Nuevo binary_sensor "Modulo RF" (connectivity) y sensor "Frecuencia RF"
+- Watchdog RF: reintenta reinicializar el CC1101 cada 30 s y reinicia el ESP32
+  tras N minutos sin módulo (config `rf_watchdog_enabled` / `rf_watchdog_minutes`,
+  por defecto activo y 15 min). Configurable desde la web y desde el switch HA
+  "Reinicio auto si falla RF" (topic `.../system/rf_watchdog`)
+- Fix falso "RF no conectado": una lectura SPI corrupta puntual marcaba el módulo
+  como desconectado de forma permanente; ahora se reintenta y no se sondea durante
+  capturas
+
+### v1.2.1
 - Soporte completo protocolo A-OK AC114
 - Auto-descubrimiento de controles A-OK
 - Captura RF sin requerir dispositivo

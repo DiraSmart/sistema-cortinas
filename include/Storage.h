@@ -25,6 +25,7 @@ public:
     bool saveDevices(const SavedDevice* devices, uint8_t count);
     bool addDevice(const SavedDevice* device);
     bool updateDevice(const char* id, const SavedDevice* device);
+    bool updateDeviceBasicInfo(const char* id, const char* name, const char* room);  // Solo nombre/habitación
     bool deleteDevice(const char* id);
     bool getDevice(const char* id, SavedDevice* device);
     uint8_t getDeviceCount();
@@ -39,6 +40,9 @@ public:
 
     // Somfy RTS
     bool updateSomfyRollingCode(const char* deviceId, uint16_t newRollingCode);
+
+    // A-OK AC114
+    bool updateAokRepeatCount(const char* deviceId, uint8_t repeatCount);
 
     // Backup y Restore
     String createBackup();

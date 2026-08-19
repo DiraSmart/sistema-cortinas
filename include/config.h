@@ -4,9 +4,27 @@
 #include <Arduino.h>
 
 // ============================================
+// CONFIGURACIÓN POR INSTALACIÓN
+// ============================================
+// Los valores propios de cada cliente (WiFi, broker MQTT, credenciales) NO van
+// en este archivo: se ponen en include/secrets.h, que está en .gitignore y por
+// tanto nunca se commitea. Copia include/secrets.h.example a include/secrets.h
+// y ajústalo. Si no existe, se usan los valores genéricos de más abajo.
+#if defined(__has_include)
+#  if __has_include("secrets.h")
+#    include "secrets.h"
+#  endif
+#endif
+
+// ============================================
 // VERSION DEL FIRMWARE
 // ============================================
-#define FIRMWARE_VERSION    "1.2.0"
+// FIRMWARE_VARIANT permite marcar la build de un cliente (ej: "-vicsons")
+// desde secrets.h, sin tocar el número de versión base.
+#ifndef FIRMWARE_VARIANT
+#define FIRMWARE_VARIANT    ""
+#endif
+#define FIRMWARE_VERSION    "1.2.7" FIRMWARE_VARIANT
 
 // ============================================
 // CONFIGURACIÓN DE PINES ESP32 -> CC1101
@@ -21,17 +39,58 @@
 // ============================================
 // CONFIGURACIÓN DE RED
 // ============================================
-// WiFi por defecto (si no se conecta, pasa a modo AP)
+// WiFi por defecto (si no se conecta, pasa a modo AP). Definir en secrets.h.
+#ifndef DEFAULT_WIFI_SSID
 #define DEFAULT_WIFI_SSID       "dirasmart"
-#define DEFAULT_WIFI_PASSWORD   "dirasmart1"
+#endif
+#ifndef DEFAULT_WIFI_PASSWORD
+#define DEFAULT_WIFI_PASSWORD   ""
+#endif
+
+// WiFi de respaldo (si la red principal no está disponible)
+#ifndef DEFAULT_WIFI_SSID2
+#define DEFAULT_WIFI_SSID2      ""
+#endif
+#ifndef DEFAULT_WIFI_PASSWORD2
+#define DEFAULT_WIFI_PASSWORD2  ""
+#endif
 
 // Access Point (modo fallback)
+#ifndef AP_SSID
 #define AP_SSID         "RF_Controller"
+#endif
+#ifndef AP_PASSWORD
 #define AP_PASSWORD     "12345678"
+#endif
 
-// Autenticación Web
+// WiFi Roaming (conexión al AP más fuerte)
+#define WIFI_ROAMING_ENABLED    true        // Habilitar búsqueda de mejor AP
+#define WIFI_SCAN_INTERVAL      300000      // Intervalo de escaneo con buena señal (5 min)
+#define WIFI_RSSI_THRESHOLD     10          // Diferencia mínima de RSSI para cambiar (dB)
+
+// NO bajar estos valores sin pruebas: con umbral 5 dB y reescaneo cada 60 s el
+// equipo a -79 dBm saltaba de antena sin parar y quedaba fuera de la red (cada
+// salto es un disconnect + hasta 10 s bloqueado). Solo se considera "señal
+// débil" para efectos de diagnóstico.
+#define WIFI_WEAK_RSSI          -72         // dBm a partir de los cuales la señal es mala
+
+// Caché del último escaneo (para diagnóstico desde la web, sin desconectar)
+#define MAX_SCANNED_APS         20
+
+struct ScannedAP {
+    char ssid[33];
+    uint8_t bssid[6];
+    int8_t rssi;
+    uint8_t channel;
+};
+
+// Autenticación Web. Definir en secrets.h.
+#ifndef WEB_AUTH_USER
 #define WEB_AUTH_USER       "admin"
-#define WEB_AUTH_PASSWORD   "dirasmart1"
+#endif
+#ifndef WEB_AUTH_PASSWORD
+#define WEB_AUTH_PASSWORD   "admin"
+#endif
 #define AP_IP           IPAddress(192, 168, 4, 1)
 #define AP_GATEWAY      IPAddress(192, 168, 4, 1)
 #define AP_SUBNET       IPAddress(255, 255, 255, 0)
@@ -39,6 +98,19 @@
 // ============================================
 // CONFIGURACIÓN MQTT
 // ============================================
+// Broker por defecto. Definir en secrets.h (vacío = se configura desde la web).
+#ifndef MQTT_DEFAULT_SERVER
+#define MQTT_DEFAULT_SERVER     ""
+#endif
+#ifndef MQTT_DEFAULT_PORT
+#define MQTT_DEFAULT_PORT       1883
+#endif
+#ifndef MQTT_DEFAULT_USER
+#define MQTT_DEFAULT_USER       ""
+#endif
+#ifndef MQTT_DEFAULT_PASSWORD
+#define MQTT_DEFAULT_PASSWORD   ""
+#endif
 #define MQTT_PORT               1883
 #define MQTT_RECONNECT_DELAY    5000
 #define MQTT_BASE_TOPIC         "rf_controller"
@@ -50,7 +122,11 @@
 #define RF_DEFAULT_FREQUENCY    433.92  // MHz
 #define RF_CAPTURE_TIMEOUT      10000   // ms
 #define RF_MAX_SIGNAL_LENGTH    512     // bytes
-#define RF_REPEAT_TRANSMIT      6      // repeticiones (aumentado para mejor confiabilidad)
+#define RF_REPEAT_TRANSMIT      12      // repeticiones (aumentado para mejor confiabilidad)
+
+// Watchdog del módulo RF
+#define RF_CHECK_INTERVAL       30000   // ms - cada cuánto se verifica el CC1101
+#define RF_WATCHDOG_DEFAULT_MIN 15      // minutos sin RF antes de reiniciar el ESP32
 
 // Frecuencias predefinidas comunes
 const float RF_FREQUENCIES[] = {
@@ -232,6 +308,7 @@ struct DooyaBidirRemote {
 struct AOKRemote {
     uint32_t remoteId;      // ID de 24 bits (único por control)
     uint8_t channel;        // Canal 1-16 (0 = todos)
+    uint8_t repeatCount;    // Número de repeticiones (1-20, default 8)
 };
 
 // ============================================
@@ -266,6 +343,8 @@ struct SystemConfig {
     // WiFi
     char wifi_ssid[64];
     char wifi_password[64];
+    char wifi_ssid2[64];        // Red de respaldo
+    char wifi_password2[64];
     bool wifi_configured;
 
     // MQTT
@@ -290,6 +369,10 @@ struct SystemConfig {
     // Sistema
     char device_name[32];
     bool auto_detect_enabled;
+
+    // Watchdog RF: reinicia el ESP32 si el CC1101 lleva N minutos sin responder
+    bool rf_watchdog_enabled;
+    uint16_t rf_watchdog_minutes;
 };
 
 // ============================================
@@ -310,7 +393,7 @@ struct SystemConfig {
 // ============================================
 // TAMAÑOS DE BUFFER
 // ============================================
-#define JSON_BUFFER_SIZE        16384  // Increased for multiple signals with large data
+#define JSON_BUFFER_SIZE        32768  // 32KB - needed for 9+ devices with signal data
 #define WEB_BUFFER_SIZE         4096
 
 #endif // CONFIG_H

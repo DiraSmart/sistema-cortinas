@@ -66,15 +66,17 @@ bool StorageManager::clearUserData() {
 void StorageManager::setDefaultConfig(SystemConfig* config) {
     memset(config, 0, sizeof(SystemConfig));
 
-    // WiFi por defecto: dirasmart / dirasmart1
+    // WiFi por defecto
     strcpy(config->wifi_ssid, DEFAULT_WIFI_SSID);
     strcpy(config->wifi_password, DEFAULT_WIFI_PASSWORD);
+    strcpy(config->wifi_ssid2, DEFAULT_WIFI_SSID2);
+    strcpy(config->wifi_password2, DEFAULT_WIFI_PASSWORD2);
     config->wifi_configured = true;  // Intentar conectar por defecto
 
-    strcpy(config->mqtt_server, "");
-    config->mqtt_port = MQTT_PORT;
-    strcpy(config->mqtt_user, "");
-    strcpy(config->mqtt_password, "");
+    strcpy(config->mqtt_server, MQTT_DEFAULT_SERVER);
+    config->mqtt_port = MQTT_DEFAULT_PORT;
+    strcpy(config->mqtt_user, MQTT_DEFAULT_USER);
+    strcpy(config->mqtt_password, MQTT_DEFAULT_PASSWORD);
 
     // Generar mqtt_client_id único usando los últimos 3 bytes de la MAC
     uint8_t mac[6];
@@ -83,7 +85,7 @@ void StorageManager::setDefaultConfig(SystemConfig* config) {
     snprintf(uniqueClientId, sizeof(uniqueClientId), "RF_%02X%02X%02X", mac[3], mac[4], mac[5]);
     strcpy(config->mqtt_client_id, uniqueClientId);
 
-    config->mqtt_enabled = false;
+    config->mqtt_enabled = true;   // Habilitado por defecto con servidor configurado
     config->mqtt_discovery = true;
 
     strcpy(config->timezone, DEFAULT_TIMEZONE);
@@ -97,6 +99,9 @@ void StorageManager::setDefaultConfig(SystemConfig* config) {
     // device_name también único con la MAC
     strcpy(config->device_name, uniqueClientId);
     config->auto_detect_enabled = true;
+
+    config->rf_watchdog_enabled = true;
+    config->rf_watchdog_minutes = RF_WATCHDOG_DEFAULT_MIN;
 }
 
 bool StorageManager::loadConfig(SystemConfig* config) {
@@ -500,6 +505,109 @@ bool StorageManager::updateSomfyRollingCode(const char* deviceId, uint16_t newRo
     return updateDevice(deviceId, &device);
 }
 
+bool StorageManager::updateDeviceBasicInfo(const char* id, const char* name, const char* room) {
+    if (!initialized || !fileExists(DEVICES_FILE)) return false;
+
+    // Leer archivo JSON directamente
+    File file = LittleFS.open(DEVICES_FILE, "r");
+    if (!file) return false;
+
+    DynamicJsonDocument doc(JSON_BUFFER_SIZE);
+    DeserializationError error = deserializeJson(doc, file);
+    file.close();
+
+    if (error) return false;
+
+    JsonArray arr = doc.as<JsonArray>();
+    bool found = false;
+
+    for (size_t i = 0; i < arr.size(); i++) {
+        JsonObject obj = arr[i];
+        if (strcmp(obj["id"] | "", id) == 0) {
+            // Actualizar SOLO nombre y room, preservando todo lo demás
+            if (name && strlen(name) > 0) {
+                obj["name"] = name;
+            }
+            if (room) {
+                obj["room"] = room;
+            }
+            found = true;
+            break;
+        }
+    }
+
+    if (!found) return false;
+
+    // Guardar
+    file = LittleFS.open(DEVICES_FILE, "w");
+    if (!file) return false;
+
+    serializeJson(doc, file);
+    file.close();
+
+    Serial.printf("[Storage] Info básica actualizada para dispositivo %s\n", id);
+    return true;
+}
+
+bool StorageManager::updateAokRepeatCount(const char* deviceId, uint8_t repeatCount) {
+    if (!initialized || !fileExists(DEVICES_FILE)) return false;
+
+    // Clamp repeat count between 1-20
+    if (repeatCount < 1) repeatCount = 1;
+    if (repeatCount > 20) repeatCount = 20;
+
+    // Leer archivo JSON directamente
+    File file = LittleFS.open(DEVICES_FILE, "r");
+    if (!file) return false;
+
+    DynamicJsonDocument doc(JSON_BUFFER_SIZE);
+    DeserializationError error = deserializeJson(doc, file);
+    file.close();
+
+    if (error) return false;
+
+    JsonArray arr = doc.as<JsonArray>();
+    bool found = false;
+
+    for (size_t i = 0; i < arr.size(); i++) {
+        JsonObject obj = arr[i];
+        if (strcmp(obj["id"] | "", deviceId) == 0) {
+            // Verificar que sea un dispositivo A-OK
+            int deviceType = obj["type"] | 0;
+            if (deviceType != DEVICE_CURTAIN_AOK) {
+                Serial.println("[Storage] Error: dispositivo no es A-OK");
+                return false;
+            }
+
+            // Actualizar solo el repeatCount en el objeto aok existente
+            if (obj.containsKey("aok")) {
+                obj["aok"]["repeatCount"] = repeatCount;
+            } else {
+                // Crear objeto aok si no existe (no debería pasar, pero por seguridad)
+                JsonObject aokObj = obj.createNestedObject("aok");
+                aokObj["repeatCount"] = repeatCount;
+                // Preservar valores por defecto para evitar pérdida de datos
+                aokObj["remoteId"] = 0;
+                aokObj["channel"] = 1;
+            }
+            found = true;
+            break;
+        }
+    }
+
+    if (!found) return false;
+
+    // Guardar
+    file = LittleFS.open(DEVICES_FILE, "w");
+    if (!file) return false;
+
+    serializeJson(doc, file);
+    file.close();
+
+    Serial.printf("[Storage] A-OK repeatCount actualizado a %d para dispositivo %s\n", repeatCount, deviceId);
+    return true;
+}
+
 String StorageManager::createBackup() {
     DynamicJsonDocument doc(JSON_BUFFER_SIZE * 2);
 
@@ -719,6 +827,7 @@ void StorageManager::deviceToJson(JsonObject& obj, const SavedDevice* device) {
         JsonObject aokObj = obj.createNestedObject("aok");
         aokObj["remoteId"] = device->aok.remoteId;
         aokObj["channel"] = device->aok.channel;
+        aokObj["repeatCount"] = device->aok.repeatCount > 0 ? device->aok.repeatCount : 12;
     }
 }
 
@@ -770,6 +879,7 @@ void StorageManager::jsonToDevice(JsonObject& obj, SavedDevice* device) {
         JsonObject aokObj = obj["aok"];
         device->aok.remoteId = aokObj["remoteId"] | 0;
         device->aok.channel = aokObj["channel"] | 1;
+        device->aok.repeatCount = aokObj["repeatCount"] | 12;  // Default 8 repeticiones
     }
 }
 
@@ -777,6 +887,8 @@ void StorageManager::configToJson(JsonObject& obj, const SystemConfig* config) {
     // WiFi
     obj["wifi_ssid"] = config->wifi_ssid;
     obj["wifi_password"] = config->wifi_password;
+    obj["wifi_ssid2"] = config->wifi_ssid2;
+    obj["wifi_password2"] = config->wifi_password2;
     obj["wifi_configured"] = config->wifi_configured;
 
     // MQTT
@@ -801,6 +913,8 @@ void StorageManager::configToJson(JsonObject& obj, const SystemConfig* config) {
     // Sistema
     obj["device_name"] = config->device_name;
     obj["auto_detect_enabled"] = config->auto_detect_enabled;
+    obj["rf_watchdog_enabled"] = config->rf_watchdog_enabled;
+    obj["rf_watchdog_minutes"] = config->rf_watchdog_minutes;
 }
 
 void StorageManager::jsonToConfig(JsonObject& obj, SystemConfig* config) {
@@ -809,6 +923,11 @@ void StorageManager::jsonToConfig(JsonObject& obj, SystemConfig* config) {
     config->wifi_ssid[63] = '\0';
     strncpy(config->wifi_password, obj["wifi_password"] | "", 63);
     config->wifi_password[63] = '\0';
+    // Red de respaldo (usa defaults si el JSON no la tiene aún)
+    strncpy(config->wifi_ssid2, obj["wifi_ssid2"] | DEFAULT_WIFI_SSID2, 63);
+    config->wifi_ssid2[63] = '\0';
+    strncpy(config->wifi_password2, obj["wifi_password2"] | DEFAULT_WIFI_PASSWORD2, 63);
+    config->wifi_password2[63] = '\0';
     config->wifi_configured = obj["wifi_configured"] | false;
 
     // MQTT
@@ -844,4 +963,10 @@ void StorageManager::jsonToConfig(JsonObject& obj, SystemConfig* config) {
     strncpy(config->device_name, obj["device_name"] | DEFAULT_DEVICE_NAME, 31);
     config->device_name[31] = '\0';
     config->auto_detect_enabled = obj["auto_detect_enabled"] | true;
+
+    // Watchdog RF
+    config->rf_watchdog_enabled = obj["rf_watchdog_enabled"] | true;
+    config->rf_watchdog_minutes = obj["rf_watchdog_minutes"] | RF_WATCHDOG_DEFAULT_MIN;
+    if (config->rf_watchdog_minutes < 1) config->rf_watchdog_minutes = 1;
+    if (config->rf_watchdog_minutes > 1440) config->rf_watchdog_minutes = 1440;
 }

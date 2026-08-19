@@ -1,10 +1,10 @@
 #include "SomfyRTS.h"
+#include <ELECHOUSE_CC1101_SRC_DRV.h>
 
 // Instancia global
 SomfyRTS somfyRTS;
 
 SomfyRTS::SomfyRTS() {
-    txPin = CC1101_GDO0;
     remoteAddress = 0;
     currentRollingCode = 0;
     encryptionKey = 0xA7;
@@ -12,12 +12,9 @@ SomfyRTS::SomfyRTS() {
     memset(frameBuffer, 0, SOMFY_FRAME_LENGTH);
 }
 
-bool SomfyRTS::begin(uint8_t pin) {
-    txPin = pin;
-    pinMode(txPin, OUTPUT);
-    digitalWrite(txPin, LOW);
+bool SomfyRTS::begin() {
     initialized = true;
-    Serial.println("[SomfyRTS] Inicializado en pin " + String(txPin));
+    Serial.println("[SomfyRTS] Inicializado (TX por GDO2)");
     return true;
 }
 
@@ -70,33 +67,83 @@ bool SomfyRTS::sendCommand(uint8_t command) {
     // Ofuscar el frame
     obfuscateFrame();
 
-    // Deshabilitar interrupciones para timing preciso
-    noInterrupts();
+    // Configurar CC1101 para transmisión Somfy (433.42 MHz, ASK/OOK, async serial)
+    configureTransmitter();
 
-    // Transmitir primer frame (con 2 hardware syncs = wakeup)
+    // Entrar en modo TX
+    ELECHOUSE_cc1101.SetTx();
+    delay(5);
+
+    // Transmitir primer frame (con wakeup syncs)
+    // Deshabilitamos interrupciones solo por cada frame individual
+    portDISABLE_INTERRUPTS();
     transmitFrame(true);
+    portENABLE_INTERRUPTS();
 
-    // Esperar gap inter-frame
-    delayMicrosecondsPrecise(SOMFY_INTER_FRAME_GAP);
+    // Gap inter-frame (con interrupciones habilitadas para no disparar watchdog)
+    delayMicroseconds(SOMFY_INTER_FRAME_GAP);
 
     // Transmitir frames de repetición
     for (int i = 0; i < SOMFY_TOTAL_FRAMES - 1; i++) {
+        portDISABLE_INTERRUPTS();
         transmitFrame(false);
+        portENABLE_INTERRUPTS();
+
         if (i < SOMFY_TOTAL_FRAMES - 2) {
-            delayMicrosecondsPrecise(SOMFY_INTER_FRAME_GAP);
+            delayMicroseconds(SOMFY_INTER_FRAME_GAP);
         }
     }
 
-    // Restaurar interrupciones
-    interrupts();
+    digitalWrite(CC1101_GDO2, LOW);
 
-    digitalWrite(txPin, LOW);
+    // Restaurar configuración CC1101 para recepción normal
+    restoreConfig();
 
     // Incrementar rolling code para próximo uso
     incrementRollingCode();
 
     Serial.println("[SomfyRTS] Comando enviado OK");
     return true;
+}
+
+void SomfyRTS::configureTransmitter() {
+    // Configurar CC1101 para transmisión Somfy RTS
+    ELECHOUSE_cc1101.setSidle();
+    delay(1);
+
+    ELECHOUSE_cc1101.Init();
+    ELECHOUSE_cc1101.setMHZ(SOMFY_FREQUENCY);  // 433.42 MHz
+    ELECHOUSE_cc1101.setModulation(2);           // ASK/OOK
+    ELECHOUSE_cc1101.setPA(12);                  // Potencia máxima
+    ELECHOUSE_cc1101.setCCMode(0);               // Transparent mode
+    ELECHOUSE_cc1101.setSyncMode(0);             // Sin sync
+    ELECHOUSE_cc1101.setCrc(0);                  // Sin CRC
+    ELECHOUSE_cc1101.setDcFilterOff(1);
+    ELECHOUSE_cc1101.setPktFormat(3);            // Async serial mode - GDO2 es TX data input
+
+    // Configurar GDO2 como salida para TX
+    pinMode(CC1101_GDO2, OUTPUT);
+    digitalWrite(CC1101_GDO2, LOW);
+
+    Serial.println("[SomfyRTS] TX configurado: 433.42 MHz, ASK/OOK, async serial");
+}
+
+void SomfyRTS::restoreConfig() {
+    // Restaurar CC1101 a configuración por defecto de recepción
+    digitalWrite(CC1101_GDO2, LOW);
+    delay(1);
+    ELECHOUSE_cc1101.setSidle();
+    pinMode(CC1101_GDO2, INPUT);
+
+    ELECHOUSE_cc1101.Init();
+    ELECHOUSE_cc1101.setMHZ(433.92);            // Frecuencia por defecto
+    ELECHOUSE_cc1101.setModulation(2);           // ASK/OOK
+    ELECHOUSE_cc1101.setCCMode(1);               // Modo normal
+    ELECHOUSE_cc1101.setSyncMode(0);
+    ELECHOUSE_cc1101.setCrc(0);
+    ELECHOUSE_cc1101.setPA(10);
+
+    Serial.println("[SomfyRTS] Configuración restaurada");
 }
 
 void SomfyRTS::buildFrame(uint8_t command) {
@@ -168,7 +215,6 @@ void SomfyRTS::transmitFrame(bool isFirstFrame) {
     sendSoftwareSync();
 
     // Enviar datos (Manchester encoding)
-    // En Manchester: 0 = LOW->HIGH, 1 = HIGH->LOW (o viceversa según convención)
     // Somfy usa: 0 = rising edge, 1 = falling edge
     for (int i = 0; i < SOMFY_FRAME_LENGTH; i++) {
         uint8_t byte = frameBuffer[i];
@@ -177,7 +223,7 @@ void SomfyRTS::transmitFrame(bool isFirstFrame) {
         }
     }
 
-    digitalWrite(txPin, LOW);
+    digitalWrite(CC1101_GDO2, LOW);
 }
 
 void SomfyRTS::sendBit(bool bit) {
@@ -187,15 +233,15 @@ void SomfyRTS::sendBit(bool bit) {
 
     if (bit) {
         // Bit 1: HIGH -> LOW
-        digitalWrite(txPin, HIGH);
+        digitalWrite(CC1101_GDO2, HIGH);
         delayMicrosecondsPrecise(SOMFY_SYMBOL_WIDTH);
-        digitalWrite(txPin, LOW);
+        digitalWrite(CC1101_GDO2, LOW);
         delayMicrosecondsPrecise(SOMFY_SYMBOL_WIDTH);
     } else {
         // Bit 0: LOW -> HIGH
-        digitalWrite(txPin, LOW);
+        digitalWrite(CC1101_GDO2, LOW);
         delayMicrosecondsPrecise(SOMFY_SYMBOL_WIDTH);
-        digitalWrite(txPin, HIGH);
+        digitalWrite(CC1101_GDO2, HIGH);
         delayMicrosecondsPrecise(SOMFY_SYMBOL_WIDTH);
     }
 }
@@ -203,18 +249,18 @@ void SomfyRTS::sendBit(bool bit) {
 void SomfyRTS::sendHardwareSync(int count) {
     // Hardware sync: pulsos high/low de 2416us cada uno
     for (int i = 0; i < count; i++) {
-        digitalWrite(txPin, HIGH);
+        digitalWrite(CC1101_GDO2, HIGH);
         delayMicrosecondsPrecise(SOMFY_HWSYNC_HIGH);
-        digitalWrite(txPin, LOW);
+        digitalWrite(CC1101_GDO2, LOW);
         delayMicrosecondsPrecise(SOMFY_HWSYNC_LOW);
     }
 }
 
 void SomfyRTS::sendSoftwareSync() {
     // Software sync: 4550us HIGH + 604us LOW
-    digitalWrite(txPin, HIGH);
+    digitalWrite(CC1101_GDO2, HIGH);
     delayMicrosecondsPrecise(SOMFY_SWSYNC_HIGH);
-    digitalWrite(txPin, LOW);
+    digitalWrite(CC1101_GDO2, LOW);
     delayMicrosecondsPrecise(SOMFY_SWSYNC_LOW);
 }
 
