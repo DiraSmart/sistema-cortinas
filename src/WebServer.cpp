@@ -1547,6 +1547,20 @@ void WebServerManager::handleWiFiAPs() {
     handleCORS();
 
     bool refresh = server->hasArg("refresh") && server->arg("refresh") == "1";
+
+    // Un escaneo bloquea el loop varios segundos y con señal débil eso basta
+    // para perder la asociación: probado en campo, un equipo a -81 dBm quedó
+    // fuera de la red varios minutos por un escaneo forzado. Con mala señal se
+    // devuelve la caché (que el roaming refresca cada 5 min) salvo que esté
+    // vacía, en cuyo caso no hay alternativa.
+    bool weakSignal = (WiFi.status() == WL_CONNECTED && WiFi.RSSI() <= WIFI_WEAK_RSSI);
+    bool scanDenied = false;
+
+    if (refresh && weakSignal && scannedAPCount > 0) {
+        scanDenied = true;
+        refresh = false;
+    }
+
     if (refresh || scannedAPCount == 0) {
         wifiScanAndCache();
     }
@@ -1557,6 +1571,10 @@ void WebServerManager::handleWiFiAPs() {
     doc["current_channel"] = WiFi.channel();
     doc["scan_age_seconds"] = lastScanTime > 0 ? (millis() - lastScanTime) / 1000 : 0;
     doc["weak_threshold"] = WIFI_WEAK_RSSI;
+    doc["weak_signal"] = weakSignal;
+    if (scanDenied) {
+        doc["scan_skipped"] = "señal débil: se devuelve la última caché para no perder la conexión";
+    }
 
     char bssidStr[18];
     snprintf(bssidStr, sizeof(bssidStr), "%02X:%02X:%02X:%02X:%02X:%02X",

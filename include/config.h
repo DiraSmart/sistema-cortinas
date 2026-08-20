@@ -24,7 +24,7 @@
 #ifndef FIRMWARE_VARIANT
 #define FIRMWARE_VARIANT    ""
 #endif
-#define FIRMWARE_VERSION    "1.2.7" FIRMWARE_VARIANT
+#define FIRMWARE_VERSION    "1.2.8" FIRMWARE_VARIANT
 
 // ============================================
 // CONFIGURACIÓN DE PINES ESP32 -> CC1101
